@@ -11,6 +11,9 @@ host = ["dep:glutin", "dep:glutin-winit", "dep:winit", "dep:raw-window-handle"]
 device = []
 test-support = []
 
+[dev-dependencies]
+png = { workspace = true }
+
 [dependencies]
 gl = { workspace = true }
 libloading = { workspace = true }
