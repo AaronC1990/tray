@@ -313,6 +313,7 @@ impl Frontend {
     }
 
     pub fn upload_bezel(&mut self, compositor: &mut Compositor, panel: (u32, u32)) {
+        slot_ui::set_scale_rows(scale_rows_matter(panel));
         if !slot_gfx::framed(panel) {
             return;
         }
@@ -352,6 +353,7 @@ impl Frontend {
         compositor.set_frame_lift(self.session.app().frame_lift());
         compositor.set_frame_split(self.session.app().frame_split());
         compositor.set_game_source_rect(self.session.app().source_rect());
+        compositor.set_game_fit(self.session.app().game_fit());
         compositor.begin_frame();
         if self.draw_rebuild(compositor) {
             return;
@@ -719,4 +721,22 @@ fn upload_rgba(
             id
         }
     }
+}
+
+/// Whether drawing at a whole scale would change any game's picture on this
+/// panel. On the RG SP every picture already lands at 3x, so the setting
+/// would do nothing there and stays out of the menu.
+pub fn scale_rows_matter(panel: (u32, u32)) -> bool {
+    use slot_gfx::{canvas_size, game_view, GameFit, WHOLE_TEXTURE};
+    let canvas = canvas_size(panel);
+    [slot_store::Platform::Gba, slot_store::Platform::Gb]
+        .into_iter()
+        .any(|p| {
+            let (w, h) = p.picture();
+            let (sw, sh) = (slot_gfx::SRC_W as f32, slot_gfx::SRC_H as f32);
+            let (x, y) = ((sw - w as f32) / 2.0 / sw, (sh - h as f32) / 2.0 / sh);
+            let pic = [x, y, 1.0 - x, 1.0 - y];
+            game_view(canvas, pic, WHOLE_TEXTURE, GameFit::Whole)
+                != game_view(canvas, pic, WHOLE_TEXTURE, GameFit::Fill)
+        })
 }

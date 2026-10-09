@@ -3,6 +3,16 @@ use crate::plate::{arrows_hint_face, centred_hints, hint_face, UndoFace, HINT_H,
 use crate::power_menu::{MENU_H, MENU_INK, MENU_PAD, MENU_PX};
 use crate::slot_chrome::{edge, opening};
 use crate::text;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SCALE_ROWS: AtomicBool = AtomicBool::new(false);
+
+/// Shows the integer scale rows on the Screen page. They only change the
+/// picture on panels where a game does not already land at a whole scale,
+/// so the RG SP keeps its four rows.
+pub fn set_scale_rows(on: bool) {
+    SCALE_ROWS.store(on, Ordering::Relaxed);
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum QuickRow {
@@ -20,10 +30,12 @@ pub enum QuickRow {
     Turbo,
     Rewind,
     GbPalettes,
+    GbaInteger,
+    GbInteger,
 }
 
 impl QuickRow {
-    pub const ALL: [QuickRow; 14] = [
+    pub const ALL: [QuickRow; 16] = [
         QuickRow::FastForward,
         QuickRow::FastForwardSound,
         QuickRow::Screen,
@@ -38,6 +50,8 @@ impl QuickRow {
         QuickRow::Turbo,
         QuickRow::Rewind,
         QuickRow::GbPalettes,
+        QuickRow::GbaInteger,
+        QuickRow::GbInteger,
     ];
 
     pub const MAIN: [QuickRow; 4] = [
@@ -53,6 +67,22 @@ impl QuickRow {
         QuickRow::ColourCorrection,
         QuickRow::GbPalettes,
     ];
+
+    pub const SCREEN_SCALED: [QuickRow; 6] = [
+        QuickRow::GbaShader,
+        QuickRow::GbaInteger,
+        QuickRow::GbShader,
+        QuickRow::GbInteger,
+        QuickRow::ColourCorrection,
+        QuickRow::GbPalettes,
+    ];
+
+    pub fn screen_page() -> &'static [QuickRow] {
+        match SCALE_ROWS.load(Ordering::Relaxed) {
+            true => &QuickRow::SCREEN_SCALED,
+            false => &QuickRow::SCREEN,
+        }
+    }
 
     pub const GAME: [QuickRow; 6] = [
         QuickRow::FastForward,
@@ -72,7 +102,9 @@ impl QuickRow {
             QuickRow::GbaShader
             | QuickRow::GbShader
             | QuickRow::ColourCorrection
-            | QuickRow::GbPalettes => &QuickRow::SCREEN,
+            | QuickRow::GbPalettes
+            | QuickRow::GbaInteger
+            | QuickRow::GbInteger => QuickRow::screen_page(),
             QuickRow::FastForward
             | QuickRow::FastForwardSound
             | QuickRow::Rewind
@@ -119,6 +151,8 @@ impl QuickRow {
             QuickRow::Turbo => "Turbo Buttons",
             QuickRow::Rewind => "Rewind",
             QuickRow::GbPalettes => "GB Palettes",
+            QuickRow::GbaInteger => "GBA Integer Scale",
+            QuickRow::GbInteger => "GB / GBC Integer Scale",
         }
     }
 

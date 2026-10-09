@@ -1,3 +1,4 @@
+use crate::layout::{game_view, GameFit, GameView};
 use crate::lcd3x::ScreenEffect;
 use crate::power::{screen_brightness, screen_rect};
 use crate::quad::Quad;
@@ -22,6 +23,10 @@ pub struct GamePass {
     fbo_scale: [f32; 2],
     u_pic: gl::types::GLint,
     pic: [f32; 4],
+    u_vis: gl::types::GLint,
+    u_texel_px: gl::types::GLint,
+    u_whole: gl::types::GLint,
+    fit: GameFit,
     paper: gl::types::GLuint,
     paper_size: f32,
     effect: ScreenEffect,
@@ -35,6 +40,7 @@ impl GamePass {
         let game = crate::gl::texture(SRC_W, SRC_H, gl::NEAREST, gl::CLAMP_TO_EDGE, gl::BGRA, None);
         let paper = crate::gl::texture(1, 1, gl::NEAREST, gl::REPEAT, gl::RGBA, Some(&[255; 4]));
         let (u_rect, u_bright, u_uv, u_mode, u_paper_size, u_pic, u_fbo);
+        let (u_vis, u_texel_px, u_whole);
         unsafe {
             gl::UseProgram(prog);
             gl::Uniform1i(crate::gl::uniform_location(prog, "u_game"), 0);
@@ -56,6 +62,9 @@ impl GamePass {
             u_paper_size = crate::gl::uniform_location(prog, "u_paper_size");
             u_fbo = crate::gl::uniform_location(prog, "u_fbo");
             u_pic = crate::gl::uniform_location(prog, "u_pic");
+            u_vis = crate::gl::uniform_location(prog, "u_vis");
+            u_texel_px = crate::gl::uniform_location(prog, "u_texel_px");
+            u_whole = crate::gl::uniform_location(prog, "u_whole");
         }
         Ok(GamePass {
             prog,
@@ -69,6 +78,10 @@ impl GamePass {
             fbo_scale: [1.0, 1.0],
             u_pic,
             pic: WHOLE_TEXTURE,
+            u_vis,
+            u_texel_px,
+            u_whole,
+            fit: GameFit::Fill,
             paper,
             paper_size: 1.0,
             effect: ScreenEffect::Lcd3x,
@@ -100,6 +113,23 @@ impl GamePass {
         self.paper_size = size as f32;
     }
 
+    pub fn set_fit(&mut self, fit: GameFit) {
+        self.fit = fit;
+    }
+
+    fn canvas(&self) -> (u32, u32) {
+        (
+            (OUT_W as f32 * self.fbo_scale[0]).round() as u32,
+            (OUT_H as f32 * self.fbo_scale[1]).round() as u32,
+        )
+    }
+
+    /// Where the live picture goes on the canvas, for `src` as the Fill
+    /// source rect.
+    pub fn view(&self, src: [f32; 4]) -> GameView {
+        game_view(self.canvas(), self.pic, src, self.fit)
+    }
+
     pub fn set_source_rect(&mut self, rect: [f32; 4]) {
         self.src = rect;
     }
@@ -126,18 +156,29 @@ impl GamePass {
     }
 
     pub fn draw(&self, quad: &Quad) {
-        let src = match self.effect {
-            ScreenEffect::Grid => whole_scale_source(self.src, self.fbo_scale),
-            _ => self.src,
+        let view = match (self.fit, self.effect) {
+            (GameFit::Fill, ScreenEffect::Grid) => {
+                GameView::fill(whole_scale_source(self.src, self.fbo_scale))
+            }
+            _ => self.view(self.src),
         };
-        self.draw_source(self.game, quad, src);
+        self.draw_source(self.game, quad, view);
     }
 
     pub fn draw_still(&self, tex: gl::types::GLuint, quad: &Quad) {
-        self.draw_source(tex, quad, WHOLE_TEXTURE);
+        self.draw_source(tex, quad, self.view(WHOLE_TEXTURE));
     }
 
-    fn draw_source(&self, tex: gl::types::GLuint, quad: &Quad, src: [f32; 4]) {
+    fn draw_source(&self, tex: gl::types::GLuint, quad: &Quad, view: GameView) {
+        let src = view.uv;
+        let canvas = self.canvas();
+        let texel_px = [
+            canvas.0 as f32 / (src[2] * SRC_W as f32),
+            canvas.1 as f32 / (src[3] * SRC_H as f32),
+        ];
+        let whole = texel_px
+            .iter()
+            .all(|s| (s - s.round()).abs() < 0.01 && *s >= 1.0);
         let (x, y, w, h) = screen_rect(self.power);
         unsafe {
             gl::UseProgram(self.prog);
@@ -154,6 +195,10 @@ impl GamePass {
                 self.pic[2],
                 self.pic[3],
             );
+            let v = view.visible;
+            gl::Uniform4f(self.u_vis, v[0], v[1], v[2], v[3]);
+            gl::Uniform2f(self.u_texel_px, texel_px[0], texel_px[1]);
+            gl::Uniform1f(self.u_whole, if whole { 1.0 } else { 0.0 });
             gl::ActiveTexture(gl::TEXTURE1);
             gl::BindTexture(gl::TEXTURE_2D, self.paper);
             gl::ActiveTexture(gl::TEXTURE0);

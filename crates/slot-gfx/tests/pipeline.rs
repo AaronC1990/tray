@@ -1,6 +1,6 @@
 use slot_gfx::{
-    blue_light_gain, canvas_size, lcd3x_factors, lcd3x_mask, Compositor, Draw, HeadlessSurface,
-    ScreenEffect, OUT_H, OUT_W, SRC_H, SRC_W,
+    blue_light_gain, canvas_size, lcd3x_factors, lcd3x_mask, Compositor, Draw, GameFit,
+    HeadlessSurface, ScreenEffect, OUT_H, OUT_W, SRC_H, SRC_W,
 };
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -597,6 +597,48 @@ fn grid_lines(frame: &[u8], w: usize, h: usize) -> (Vec<usize>, Vec<usize>) {
     (cols, rows)
 }
 
+/// The darkness a pixel should get from an evenly spaced grid: one line a
+/// third of a game pixel wide at the start of every game pixel, averaged
+/// over the panel pixel's area. `scale` is panel pixels per game pixel.
+fn ideal_grid(px: usize, scale: f32) -> f32 {
+    let run = |x: f32| (x / scale).floor() / 3.0 + ((x / scale).fract()).min(1.0 / 3.0);
+    let covered = (run(px as f32 + 1.0) - run(px as f32)) * scale;
+    0.75 * covered
+}
+
+fn darkness_profiles(frame: &[u8], w: usize, h: usize) -> (Vec<f32>, Vec<f32>) {
+    let g = |x: usize, y: usize| frame[(y * w + x) * 4 + 1] as f32;
+    let lit = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| g(x, y))
+        .fold(0.0, f32::max);
+    let brightest = |vals: Vec<(usize, f32)>| {
+        vals.into_iter()
+            .fold((0, f32::MIN), |m, v| if v.1 > m.1 { v } else { m })
+            .0
+    };
+    // The grid takes the darker of the two axes, so each axis is read along
+    // a line the other axis's grid leaves untouched.
+    let clear_row = brightest((0..h).map(|y| (y, (0..w).map(|x| g(x, y)).sum())).collect());
+    let clear_col = brightest((0..w).map(|x| (x, (0..h).map(|y| g(x, y)).sum())).collect());
+    let cols = (0..w).map(|x| 1.0 - g(x, clear_row) / lit).collect();
+    let rows = (0..h).map(|y| 1.0 - g(clear_col, y) / lit).collect();
+    (cols, rows)
+}
+
+/// Every panel pixel along the axis is exactly the area average of an
+/// evenly spaced grid, so each game pixel carries the same line at the same
+/// pitch however the panel pixels fall across it.
+fn assert_even(profile: &[f32], scale: f32, what: &str) {
+    for (x, &d) in profile.iter().enumerate() {
+        let want = ideal_grid(x, scale);
+        assert!(
+            (d - want).abs() <= 0.02,
+            "{what}: pixel {x} has darkness {d}, an even grid gives {want}"
+        );
+    }
+}
+
 #[test]
 fn the_grid_draws_one_dark_line_per_game_pixel_at_3x() {
     let Some((_g, _s, mut c)) = compositor() else {
@@ -615,20 +657,15 @@ fn the_grid_draws_one_dark_line_per_game_pixel_at_3x() {
 }
 
 #[test]
-fn the_grid_marks_every_game_pixel_edge_on_a_4_by_3_panel() {
+fn the_grid_gives_every_game_pixel_the_same_line_on_a_4_by_3_panel() {
     let Some((_g, _s, mut c)) = compositor() else {
         return;
     };
     let (frame, w, h) = grid_frame(&mut c, (640, 480));
     assert_eq!((w, h), (640, 427));
-    let (cols, rows) = grid_lines(&frame, w, h);
-    assert_eq!(cols.len(), SRC_W as usize, "dark columns: {cols:?}");
-    assert_eq!(rows.len(), SRC_H as usize, "dark rows: {rows:?}");
-    assert!(
-        cols.windows(2).all(|p| p[1] - p[0] >= 2),
-        "columns: {cols:?}"
-    );
-    assert!(rows.windows(2).all(|p| p[1] - p[0] >= 2), "rows: {rows:?}");
+    let (cols, rows) = darkness_profiles(&frame, w, h);
+    assert_even(&cols, w as f32 / SRC_W as f32, "columns");
+    assert_even(&rows, h as f32 / SRC_H as f32, "rows");
 }
 
 fn stretched_gb_grid(c: &mut Compositor, window: (u32, u32)) -> (Vec<u8>, usize, usize) {
@@ -650,22 +687,14 @@ fn stretched_gb_grid(c: &mut Compositor, window: (u32, u32)) -> (Vec<u8>, usize,
 }
 
 #[test]
-fn the_grid_marks_every_game_boy_pixel_edge_when_stretched() {
+fn the_grid_marks_every_game_boy_pixel_evenly_when_stretched() {
     let Some((_g, _s, mut c)) = compositor() else {
         return;
     };
     let (frame, w, h) = stretched_gb_grid(&mut c, (OUT_W, OUT_H));
-    let (cols, rows) = grid_lines(&frame, w, h);
-    assert_eq!(cols.len(), GB_W, "dark columns: {cols:?}");
-    assert_eq!(rows.len(), GB_H, "dark rows: {rows:?}");
-    assert!(
-        cols.windows(2).all(|p| (4..=5).contains(&(p[1] - p[0]))),
-        "columns: {cols:?}"
-    );
-    assert!(
-        rows.windows(2).all(|p| (3..=4).contains(&(p[1] - p[0]))),
-        "rows: {rows:?}"
-    );
+    let (cols, rows) = darkness_profiles(&frame, w, h);
+    assert_even(&cols, w as f32 / GB_W as f32, "columns");
+    assert_even(&rows, h as f32 / GB_H as f32, "rows");
 }
 
 #[test]
@@ -683,4 +712,153 @@ fn the_grid_keeps_game_boy_rows_even_when_stretched_on_a_4_by_3_panel() {
     );
     assert!(rows.windows(2).all(|p| p[1] - p[0] == 3), "rows: {rows:?}");
     assert_eq!(rows.len(), 142, "dark rows: {rows:?}");
+}
+
+fn at(frame: &[u8], w: usize, x: usize, y: usize) -> [u8; 3] {
+    let o = (y * w + x) * 4;
+    [frame[o], frame[o + 1], frame[o + 2]]
+}
+
+fn plain_frame(
+    c: &mut Compositor,
+    window: (u32, u32),
+    fit: GameFit,
+    pic: [f32; 4],
+    shot: &[u8],
+) -> (Vec<u8>, usize, usize) {
+    c.set_picture(pic);
+    c.set_game_source_rect(WHOLE);
+    c.set_game_fit(fit);
+    c.fit(window);
+    c.set_screen_effect(ScreenEffect::None);
+    c.set_screen_power(1.0);
+    c.begin_frame();
+    c.upload_game(shot);
+    c.draw_game();
+    let (w, h) = canvas_size(window);
+    let frame = c.read_frame();
+    c.set_game_fit(GameFit::Fill);
+    (frame, w as usize, h as usize)
+}
+
+fn gba_texel(x: usize, y: usize) -> [u8; 3] {
+    [
+        (x * 7 % 256) as u8,
+        (y * 11 % 256) as u8,
+        ((x + y) % 2 * 200) as u8,
+    ]
+}
+
+fn gba_shot(texel: impl Fn(usize, usize) -> [u8; 3]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity((SRC_W * SRC_H * 4) as usize);
+    for y in 0..SRC_H as usize {
+        for x in 0..SRC_W as usize {
+            let rgb = texel(x, y);
+            buf.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 0]);
+        }
+    }
+    buf
+}
+
+#[test]
+fn sharp_fill_gives_every_gba_pixel_its_exact_share_of_a_4_by_3_panel() {
+    let Some((_g, _s, mut c)) = compositor() else {
+        return;
+    };
+    let shot = gba_shot(|x, _| if x % 3 == 0 { [255; 3] } else { [0; 3] });
+    let (frame, w, _) = plain_frame(&mut c, (640, 480), GameFit::Fill, WHOLE, &shot);
+    let scale = w as f32 / SRC_W as f32;
+    for x in 0..w {
+        let (a, b) = (x as f32 / scale, (x + 1) as f32 / scale);
+        let lit: f32 = (a.floor() as usize..=b.min(SRC_W as f32 - 1e-3).floor() as usize)
+            .filter(|t| t % 3 == 0)
+            .map(|t| (b.min(t as f32 + 1.0) - a.max(t as f32)).max(0.0))
+            .sum::<f32>()
+            / (b - a);
+        let got = at(&frame, w, x, 100)[1] as f32 / 255.0;
+        assert!(
+            (got - lit).abs() <= 0.02,
+            "column {x}: {got}, the white game pixels cover {lit} of it"
+        );
+    }
+}
+
+#[test]
+fn whole_draws_a_game_boy_at_3x_on_a_4_by_3_panel() {
+    let Some((_g, _s, mut c)) = compositor() else {
+        return;
+    };
+    let margin = [10, 20, 30];
+    let texel = |x: usize, y: usize| [(x * 3) as u8, (y * 5) as u8, ((x ^ y) & 1) as u8 * 250];
+    let shot = gb_shaped(texel, margin);
+    let pic = [
+        GB_RECT[0],
+        GB_RECT[1],
+        GB_RECT[0] + GB_RECT[2],
+        GB_RECT[1] + GB_RECT[3],
+    ];
+    let (frame, w, h) = plain_frame(&mut c, (640, 480), GameFit::Whole, pic, &shot);
+    assert_eq!((w, h), (640, 427));
+    for row in 1..143 {
+        for col in 0..GB_W {
+            for (dx, dy) in [(0, 0), (2, 0), (0, 2), (2, 2)] {
+                let (x, y) = (80 + col * 3 + dx, (row - 1) * 3 + dy);
+                assert_eq!(at(&frame, w, x, y), texel(col, row), "GB pixel {col},{row}");
+            }
+        }
+    }
+    assert_eq!(
+        at(&frame, w, 300, 426),
+        [0, 0, 0],
+        "the trimmed last row stays dark"
+    );
+    assert_eq!(
+        at(&frame, w, 40, 200),
+        margin,
+        "the margin beside the picture is kept"
+    );
+}
+
+#[test]
+fn whole_draws_a_gba_at_2x_centred_on_a_4_by_3_panel() {
+    let Some((_g, _s, mut c)) = compositor() else {
+        return;
+    };
+    let (frame, w, _) = plain_frame(
+        &mut c,
+        (640, 480),
+        GameFit::Whole,
+        WHOLE,
+        &gba_shot(gba_texel),
+    );
+    for ty in 0..SRC_H as usize {
+        for tx in 0..SRC_W as usize {
+            for (dx, dy) in [(0, 0), (1, 1)] {
+                let (x, y) = (80 + tx * 2 + dx, 53 + ty * 2 + dy);
+                assert_eq!(
+                    at(&frame, w, x, y),
+                    gba_texel(tx, ty),
+                    "GBA pixel {tx},{ty}"
+                );
+            }
+        }
+    }
+    for (x, y) in [(79, 100), (560, 100), (300, 52), (300, 373)] {
+        assert_eq!(
+            at(&frame, w, x, y),
+            [0, 0, 0],
+            "outside the picture at {x},{y}"
+        );
+    }
+}
+
+#[test]
+fn whole_and_fill_draw_the_same_frame_on_the_rg_sp() {
+    let Some((_g, _s, mut c)) = compositor() else {
+        return;
+    };
+    let shot = gba_shot(gba_texel);
+    let fill = plain_frame(&mut c, (OUT_W, OUT_H), GameFit::Fill, WHOLE, &shot).0;
+    let whole = plain_frame(&mut c, (OUT_W, OUT_H), GameFit::Whole, WHOLE, &shot).0;
+    assert!(fill == whole, "whole changed the RG SP picture");
 }

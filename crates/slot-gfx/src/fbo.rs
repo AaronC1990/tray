@@ -193,6 +193,10 @@ impl Compositor {
         self.game.set_power(t);
     }
 
+    pub fn set_game_fit(&mut self, fit: crate::GameFit) {
+        self.game.set_fit(fit);
+    }
+
     pub fn set_game_source_rect(&mut self, rect: [f32; 4]) {
         self.game.set_source_rect(rect);
     }

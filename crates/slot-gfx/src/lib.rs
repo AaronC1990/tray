@@ -6,8 +6,11 @@ mod gl;
 mod grade;
 #[cfg(target_os = "macos")]
 mod headless;
+#[cfg(target_os = "linux")]
+mod headless_egl;
 #[cfg(feature = "host")]
 mod host;
+mod layout;
 mod lcd3x;
 mod pipeline;
 mod power;
@@ -22,8 +25,11 @@ pub use fbo::{canvas_size, Compositor, BACKDROP};
 pub use grade::{blue_light_gain, BLUE_LIGHT_MAX};
 #[cfg(target_os = "macos")]
 pub use headless::HeadlessSurface;
+#[cfg(target_os = "linux")]
+pub use headless_egl::HeadlessSurface;
 #[cfg(feature = "host")]
 pub use host::HostSurface;
+pub use layout::{game_view, GameFit, GameView, MAX_TRIM_PER_SIDE};
 pub use lcd3x::{lcd3x_factors, lcd3x_mask, ScreenEffect};
 pub use pipeline::{SCALE, SRC_H, SRC_W, WHOLE_TEXTURE};
 pub use power::{screen_brightness, screen_scale, screen_width};

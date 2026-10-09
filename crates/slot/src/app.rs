@@ -638,6 +638,8 @@ impl App {
             QuickRow::FastForwardSound => Some(QuickValue::flag(self.state.ff_sound)),
             QuickRow::ColourCorrection => Some(QuickValue::flag(self.state.colour_correction)),
             QuickRow::GbPalettes => Some(QuickValue::flag(self.state.gb_palettes)),
+            QuickRow::GbaInteger => Some(QuickValue::flag(self.state.integer_gba)),
+            QuickRow::GbInteger => Some(QuickValue::flag(self.state.integer_gb)),
             QuickRow::GbaShader => Some(shader_value(self.state.shader_gba)),
             QuickRow::GbShader => Some(shader_value(self.state.shader_gb)),
             QuickRow::Rumble => Some(QuickValue::flag(self.state.rumble)),
@@ -829,6 +831,20 @@ impl App {
 
     pub fn set_video_mode(&mut self, mode: VideoMode) {
         self.video_mode = mode;
+    }
+
+    /// Whether the game is drawn at a whole scale or spread over the
+    /// screen. Stretch always spreads; otherwise the platform's Integer Scale
+    /// setting decides.
+    pub fn game_fit(&self) -> slot_gfx::GameFit {
+        let whole = match self.platform {
+            Platform::Gba => self.state.integer_gba,
+            Platform::Gb | Platform::Gbc => self.state.integer_gb,
+        };
+        match self.video_mode == VideoMode::Actual && whole {
+            true => slot_gfx::GameFit::Whole,
+            false => slot_gfx::GameFit::Fill,
+        }
     }
 
     pub fn source_rect(&self) -> [f32; 4] {
@@ -1334,6 +1350,8 @@ impl App {
             | QuickRow::GbaShader
             | QuickRow::GbShader
             | QuickRow::GbPalettes
+            | QuickRow::GbaInteger
+            | QuickRow::GbInteger
             | QuickRow::Rumble => {}
         }
     }
@@ -1372,6 +1390,8 @@ impl App {
             QuickRow::Turbo => s.turbo = !s.turbo,
             QuickRow::Rewind => s.rewind = !s.rewind,
             QuickRow::GbPalettes => s.gb_palettes = !s.gb_palettes,
+            QuickRow::GbaInteger => s.integer_gba = !s.integer_gba,
+            QuickRow::GbInteger => s.integer_gb = !s.integer_gb,
             QuickRow::DateTime | QuickRow::About | QuickRow::Screen | QuickRow::Game => return,
         }
         self.persist();

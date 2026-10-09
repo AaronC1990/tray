@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Games on the RG35XXSP no longer have uneven pixels. Its 640 wide screen puts a GBA picture at 2.667x, which drew some game pixels 3 screen pixels wide and some 2. Pictures that can't land at a whole scale are now sampled so every game pixel gets the same share of the screen, and the Grid, LCD3x and Dot shaders are drawn to match.
+- Integer Scale settings on the Screen page, one for GBA and one for GB / GBC, on screens where they change anything. GB / GBC is on by default and draws Game Boy games at a sharp 3x, trimming one row at the top and bottom to fit. GBA Integer Scale draws at a sharp 2x with a border instead of filling the screen.
+- Game Boy games stretched with L1 get the same even pixels on every screen, the RG SP included.
+- The GPU tests now run on Linux as well as macOS, through Mesa's offscreen GLES.
+
 ## [1.5.0](https://github.com/BrandonKowalski/slot/releases/tag/v1.5.0)
 
 - Rumble regression fixed.
