@@ -862,3 +862,36 @@ fn whole_and_fill_draw_the_same_frame_on_the_rg_sp() {
     let whole = plain_frame(&mut c, (OUT_W, OUT_H), GameFit::Whole, WHOLE, &shot).0;
     assert!(fill == whole, "whole changed the RG SP picture");
 }
+
+#[test]
+fn a_whole_game_boy_grid_has_one_line_every_3_px_to_the_bottom_on_a_4_by_3_panel() {
+    let Some((_g, _s, mut c)) = compositor() else {
+        return;
+    };
+    let pic = [
+        GB_RECT[0],
+        GB_RECT[1],
+        GB_RECT[0] + GB_RECT[2],
+        GB_RECT[1] + GB_RECT[3],
+    ];
+    c.set_picture(pic);
+    c.set_game_source_rect(WHOLE);
+    c.set_game_fit(GameFit::Whole);
+    c.fit((640, 480));
+    c.set_screen_effect(ScreenEffect::Grid);
+    c.set_screen_power(1.0);
+    c.begin_frame();
+    c.upload_game(&gb_shaped(|_, _| [0xc0, 0xc0, 0xc0], [0, 0, 0]));
+    c.draw_game();
+    let frame = c.read_frame();
+    c.set_game_fit(GameFit::Fill);
+    let lit = at(&frame, 640, 81, 1)[1];
+    let dark_rows: Vec<usize> = (0..426)
+        .filter(|&y| {
+            (2 * at(&frame, 640, 300, y)[1] as u32) < lit as u32 && at(&frame, 640, 301, y)[1] < lit
+        })
+        .filter(|&y| (81..560).all(|x| at(&frame, 640, x, y)[1] < lit))
+        .collect();
+    let want: Vec<usize> = (0..142).map(|r| r * 3).collect();
+    assert_eq!(dark_rows, want, "grid rows down the 3x picture");
+}

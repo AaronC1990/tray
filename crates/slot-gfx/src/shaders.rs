@@ -150,7 +150,13 @@ void main() {
     } else if (u_mode > 1.5) {
         vec2 hp = 0.5 * u_uv.zw * u_src / (u_rect.zw * u_fbo);
         vec2 edge = max(step(f - hp, vec2(1e-4)), step(vec2(1.0) + 1e-4, f + hp));
-        if (!fine) {
+        if (fine) {
+            // Which panel pixel of the game pixel this is, counted from its
+            // first. At a whole scale a pixel's centre sits exactly half a
+            // pixel past the game pixel's edge, so a test against that edge
+            // flips on the GPU's rounding; counting holds to half a pixel.
+            edge = vec2(equal(floor(f * 0.5 / hp), vec2(0.0)));
+        } else {
             vec2 t = uv * u_src;
             edge = (grid_run(t + h) - grid_run(t - h)) / (2.0 * h);
         }
