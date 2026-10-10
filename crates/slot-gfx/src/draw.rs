@@ -114,6 +114,15 @@ impl Sprites {
         self.push(w, h, rgba, gl::NEAREST)
     }
 
+    /// Sets the size, in its own units, of the area draws are placed in.
+    /// The compositor's canvas is 720x480; an overlay uses panel pixels.
+    pub fn set_target(&mut self, w: f32, h: f32) {
+        unsafe {
+            gl::UseProgram(self.prog);
+            gl::Uniform2f(crate::gl::uniform_location(self.prog, "u_target"), w, h);
+        }
+    }
+
     /// Canvas pixels per canvas unit. Faces created after this is set are
     /// shrunk to the panel once, rather than by the GPU every frame.
     pub fn set_scale(&mut self, scale: [f32; 2]) {

@@ -1,0 +1,28 @@
+[package]
+name = "tray"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["host"]
+host = ["slot/host", "slot-gfx/host"]
+device = ["slot/device", "slot-gfx/device"]
+
+[[bin]]
+name = "tray-psx"
+path = "src/main.rs"
+
+[dependencies]
+slot = { path = "../slot", default-features = false }
+slot-gfx = { path = "../slot-gfx", default-features = false }
+slot-input = { path = "../slot-input" }
+slot-retro = { path = "../slot-retro" }
+slot-store = { path = "../slot-store" }
+slot-ui = { path = "../slot-ui" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+png = { workspace = true }
+gl = { workspace = true }
