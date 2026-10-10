@@ -1,0 +1,14 @@
+tray
+====
+
+tray is a frontend for the Anbernic RG35XXSP that runs PlayStation, Game Boy
+Advance, Game Boy and Game Boy Color games on top of BaseOS.
+
+It is built on slot by Brandon Kowalski (https://github.com/BrandonKowalski/slot),
+whose git history it carries. slot is licensed under the GNU General Public
+License v3.0, and so is tray; see LICENSE. The licenses of the fonts, shaders,
+bezel art and emulator cores tray ships are in licenses/.
+
+PlayStation emulation is by PCSX ReARMed (https://github.com/libretro/pcsx_rearmed),
+licensed under the GNU General Public License v2.0 or later, built from the
+commit pinned in cores/pcsx/build.sh.

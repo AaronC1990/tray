@@ -20,10 +20,51 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 enum PixelFormat {
     Xrgb8888,
     Rgb565,
+    Xrgb1555,
+}
+
+/// Writes one row of the core's pixels as XRGB8888 (B, G, R, X in memory).
+unsafe fn put_row(format: PixelFormat, src: *const u8, dst: &mut [u8], cols: usize) {
+    match format {
+        PixelFormat::Xrgb8888 => {
+            ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), cols * 4);
+        }
+        PixelFormat::Rgb565 => {
+            for x in 0..cols {
+                let p = ptr::read_unaligned((src as *const u16).add(x));
+                let r = ((p >> 11) & 0x1f) as u8;
+                let g = ((p >> 5) & 0x3f) as u8;
+                let b = (p & 0x1f) as u8;
+                let o = x * 4;
+                dst[o] = (b << 3) | (b >> 2);
+                dst[o + 1] = (g << 2) | (g >> 4);
+                dst[o + 2] = (r << 3) | (r >> 2);
+                dst[o + 3] = 0;
+            }
+        }
+        PixelFormat::Xrgb1555 => {
+            for x in 0..cols {
+                let p = ptr::read_unaligned((src as *const u16).add(x));
+                let r = ((p >> 10) & 0x1f) as u8;
+                let g = ((p >> 5) & 0x1f) as u8;
+                let b = (p & 0x1f) as u8;
+                let o = x * 4;
+                dst[o] = (b << 3) | (b >> 2);
+                dst[o + 1] = (g << 3) | (g >> 2);
+                dst[o + 2] = (r << 3) | (r >> 2);
+                dst[o + 3] = 0;
+            }
+        }
+    }
 }
 
 struct Host {
     video: Vec<u8>,
+    /// Frames kept at the core's own size, for cores whose picture is not
+    /// a fixed 240x160, such as a PlayStation's.
+    native: bool,
+    frame: Vec<u8>,
+    frame_size: (u32, u32),
     format: PixelFormat,
     audio: Vec<i16>,
     inputs: [u16; 2],
@@ -89,6 +130,7 @@ unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
             let want = match *(data as *const c_uint) {
                 PIXEL_FORMAT_XRGB8888 => PixelFormat::Xrgb8888,
                 PIXEL_FORMAT_RGB565 => PixelFormat::Rgb565,
+                PIXEL_FORMAT_0RGB1555 => PixelFormat::Xrgb1555,
                 _ => return false,
             };
             with_host(|h| h.format = want).is_some()
@@ -318,6 +360,17 @@ unsafe extern "C" fn video_refresh(
         return;
     }
     with_host(|h| {
+        if h.native {
+            let (cols, rows) = (width as usize, height as usize);
+            h.frame.resize(cols * rows * 4, 0);
+            h.frame_size = (width, height);
+            for y in 0..rows {
+                let src = (data as *const u8).add(y * pitch);
+                let row = y * cols * 4;
+                put_row(h.format, src, &mut h.frame[row..row + cols * 4], cols);
+            }
+            return;
+        }
         let cols = width.min(GBA_W) as usize;
         let rows = height.min(GBA_H) as usize;
         let ox = (GBA_W as usize - cols) / 2;
@@ -328,24 +381,7 @@ unsafe extern "C" fn video_refresh(
         for y in 0..rows {
             let src = (data as *const u8).add(y * pitch);
             let row = ((y + oy) * GBA_W as usize + ox) * 4;
-            match h.format {
-                PixelFormat::Xrgb8888 => {
-                    ptr::copy_nonoverlapping(src, h.video.as_mut_ptr().add(row), cols * 4);
-                }
-                PixelFormat::Rgb565 => {
-                    for x in 0..cols {
-                        let p = ptr::read_unaligned((src as *const u16).add(x));
-                        let r = ((p >> 11) & 0x1f) as u8;
-                        let g = ((p >> 5) & 0x3f) as u8;
-                        let b = (p & 0x1f) as u8;
-                        let o = row + x * 4;
-                        h.video[o] = (b << 3) | (b >> 2);
-                        h.video[o + 1] = (g << 2) | (g >> 4);
-                        h.video[o + 2] = (r << 3) | (r >> 2);
-                        h.video[o + 3] = 0;
-                    }
-                }
-            }
+            put_row(h.format, src, &mut h.video[row..row + cols * 4], cols);
         }
     });
 }
@@ -412,6 +448,30 @@ impl LibretroCore {
             .inspect_err(|_| LIVE.store(false, Ordering::SeqCst))
     }
 
+    /// Keeps each frame at the size the core sends it rather than fitting it
+    /// into the 240x160 GBA picture. Read it with `frame`.
+    pub fn set_native_video(&mut self, on: bool) {
+        self.host.native = on;
+    }
+
+    /// The last frame in native mode, as XRGB8888 (B, G, R, X), with its width
+    /// and height. Empty until the core has drawn one.
+    pub fn frame(&self) -> (&[u8], u32, u32) {
+        (
+            &self.host.frame,
+            self.host.frame_size.0,
+            self.host.frame_size.1,
+        )
+    }
+
+    /// Whether the core opens content itself from its path, as disc-based
+    /// cores do, rather than taking it whole from memory.
+    pub fn needs_full_path(&self) -> bool {
+        let mut info = SystemInfo::default();
+        unsafe { (self.api.get_system_info)(&mut info) };
+        info.need_fullpath
+    }
+
     pub fn reported_system_dir(&self) -> String {
         self.host.system_dir.to_string_lossy().into_owned()
     }
@@ -470,6 +530,9 @@ impl LibretroCore {
         }
         let mut host = Box::new(Host {
             video: vec![0; VIDEO_BYTES],
+            native: false,
+            frame: Vec::new(),
+            frame_size: (0, 0),
             format: PixelFormat::Xrgb8888,
             audio: Vec::new(),
             inputs: [0; 2],
@@ -537,14 +600,22 @@ impl RetroCore for LibretroCore {
 
     fn load(&mut self, rom: &Path) -> Result<(), CoreError> {
         self.unload();
-        self.rom = std::fs::read(rom)?;
+        // A disc image can be hundreds of megabytes; a core that opens
+        // content by path is handed only the path.
+        self.rom = match self.needs_full_path() {
+            true => Vec::new(),
+            false => std::fs::read(rom)?,
+        };
         self.rom_path = Some(
             CString::new(rom.as_os_str().as_encoded_bytes())
                 .map_err(|_| CoreError::Load("rom path contains a nul".into()))?,
         );
         let info = GameInfo {
             path: self.rom_path.as_ref().map_or(ptr::null(), |p| p.as_ptr()),
-            data: self.rom.as_ptr() as *const c_void,
+            data: match self.rom.is_empty() {
+                true => ptr::null(),
+                false => self.rom.as_ptr() as *const c_void,
+            },
             size: self.rom.len(),
             meta: ptr::null(),
         };
@@ -681,6 +752,9 @@ mod tests {
     fn host_with(options: HashMap<String, CString>, options_dirty: bool) -> Box<Host> {
         Box::new(Host {
             video: vec![0; VIDEO_BYTES],
+            native: false,
+            frame: Vec::new(),
+            frame_size: (0, 0),
             format: PixelFormat::Xrgb8888,
             audio: Vec::new(),
             inputs: [0; 2],
@@ -696,6 +770,54 @@ mod tests {
             options_dirty,
             declared: HashMap::new(),
         })
+    }
+
+    #[test]
+    fn a_native_frame_keeps_the_cores_own_size() {
+        let mut host = host_with(HashMap::new(), false);
+        host.native = true;
+        let frame: Vec<u8> = (0..320 * 240)
+            .flat_map(|i| (i as u32).to_le_bytes())
+            .collect();
+        let _a = Active::bind(&mut host);
+        unsafe { video_refresh(frame.as_ptr() as *const c_void, 320, 240, 320 * 4) };
+        let (px, w, h) =
+            unsafe { with_host(|h| (h.frame.clone(), h.frame_size.0, h.frame_size.1)) }.unwrap();
+        assert_eq!((w, h), (320, 240));
+        assert_eq!(px, frame, "the frame was not copied as sent");
+        let untouched = unsafe { with_host(|h| h.video.iter().all(|&b| b == 0)) }.unwrap();
+        assert!(untouched, "the GBA picture was written in native mode");
+    }
+
+    #[test]
+    fn a_native_frame_follows_the_core_when_its_size_changes() {
+        let mut host = host_with(HashMap::new(), false);
+        host.native = true;
+        let _a = Active::bind(&mut host);
+        for (w, h) in [(320u32, 240u32), (640, 480), (256, 224)] {
+            let frame = vec![0x7fu8; (w * h * 4) as usize];
+            unsafe { video_refresh(frame.as_ptr() as *const c_void, w, h, (w * 4) as usize) };
+            let got = unsafe { with_host(|h| (h.frame.len(), h.frame_size)) }.unwrap();
+            assert_eq!(got, ((w * h * 4) as usize, (w, h)));
+        }
+    }
+
+    #[test]
+    fn xrgb1555_pixels_expand_to_full_range() {
+        let mut host = host_with(HashMap::new(), false);
+        host.native = true;
+        host.format = PixelFormat::Xrgb1555;
+        // white, pure red, pure green, pure blue
+        let px: [u16; 4] = [0x7fff, 0x7c00, 0x03e0, 0x001f];
+        let bytes: Vec<u8> = px.iter().flat_map(|p| p.to_le_bytes()).collect();
+        let _a = Active::bind(&mut host);
+        unsafe { video_refresh(bytes.as_ptr() as *const c_void, 4, 1, 8) };
+        let frame = unsafe { with_host(|h| h.frame.clone()) }.unwrap();
+        assert_eq!(
+            frame,
+            vec![255, 255, 255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 0],
+            "B, G, R, X per pixel"
+        );
     }
 
     fn declaration(key: &str, value: &str) -> (Variable, CString, CString) {

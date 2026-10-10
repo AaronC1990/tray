@@ -21,6 +21,7 @@ pub const SET_NETPACKET_INTERFACE: c_uint = 78;
 pub const RUMBLE_STRONG: c_uint = 0;
 pub const RUMBLE_WEAK: c_uint = 1;
 
+pub const PIXEL_FORMAT_0RGB1555: c_uint = 0;
 pub const PIXEL_FORMAT_XRGB8888: c_uint = 1;
 pub const PIXEL_FORMAT_RGB565: c_uint = 2;
 pub const DEVICE_JOYPAD: c_uint = 1;
@@ -63,6 +64,27 @@ pub struct SystemTiming {
 pub struct SystemAvInfo {
     pub geometry: GameGeometry,
     pub timing: SystemTiming,
+}
+
+#[repr(C)]
+pub struct SystemInfo {
+    pub library_name: *const c_char,
+    pub library_version: *const c_char,
+    pub valid_extensions: *const c_char,
+    pub need_fullpath: bool,
+    pub block_extract: bool,
+}
+
+impl Default for SystemInfo {
+    fn default() -> Self {
+        SystemInfo {
+            library_name: std::ptr::null(),
+            library_version: std::ptr::null(),
+            valid_extensions: std::ptr::null(),
+            need_fullpath: false,
+            block_extract: false,
+        }
+    }
 }
 
 #[repr(C)]
@@ -128,6 +150,7 @@ pub struct Api {
     pub init: unsafe extern "C" fn(),
     pub deinit: unsafe extern "C" fn(),
     pub api_version: unsafe extern "C" fn() -> c_uint,
+    pub get_system_info: unsafe extern "C" fn(*mut SystemInfo),
     pub get_system_av_info: unsafe extern "C" fn(*mut SystemAvInfo),
     pub set_environment: unsafe extern "C" fn(EnvironmentFn),
     pub set_video_refresh: unsafe extern "C" fn(VideoRefreshFn),
@@ -158,6 +181,7 @@ impl Api {
             init: get!("retro_init"),
             deinit: get!("retro_deinit"),
             api_version: get!("retro_api_version"),
+            get_system_info: get!("retro_get_system_info"),
             get_system_av_info: get!("retro_get_system_av_info"),
             set_environment: get!("retro_set_environment"),
             set_video_refresh: get!("retro_set_video_refresh"),
