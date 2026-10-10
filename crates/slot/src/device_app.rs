@@ -85,6 +85,7 @@ pub fn run() {
     eprintln!("slot: {}", platform.report());
     platform.trace_boot();
     let mut frontend = Frontend::boot(Box::new(platform));
+    compositor.fit(surface.window_size());
     frontend.upload_faces(&mut compositor);
     frontend.upload_bezel(&mut compositor, surface.window_size());
     let mut input = DeviceInput::open(&root);

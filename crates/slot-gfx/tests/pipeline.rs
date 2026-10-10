@@ -895,3 +895,39 @@ fn a_whole_game_boy_grid_has_one_line_every_3_px_to_the_bottom_on_a_4_by_3_panel
     let want: Vec<usize> = (0..142).map(|r| r * 3).collect();
     assert_eq!(dark_rows, want, "grid rows down the 3x picture");
 }
+
+#[test]
+fn a_face_drawn_at_its_own_size_lands_whole_on_a_4_by_3_panel() {
+    let Some((_g, _s, mut c)) = compositor() else {
+        return;
+    };
+    c.fit((640, 480));
+    // 90 units across is 80 panel pixels; stripes 9 units wide become 8.
+    let (fw, fh) = (90u32, 18u32);
+    let rgba: Vec<u8> = (0..fh)
+        .flat_map(|_| {
+            (0..fw).flat_map(|x| match (x / 9) % 2 {
+                0 => [255u8, 255, 255, 255],
+                _ => [0, 0, 0, 255],
+            })
+        })
+        .collect();
+    let tex = c.create_texture(fw, fh, &rgba);
+    c.begin_frame();
+    c.draw_list(&[Draw::Tex {
+        x: 100.3,
+        y: 50.6,
+        w: fw as f32,
+        h: fh as f32,
+        tex,
+        alpha: 1.0,
+    }]);
+    let frame = c.read_frame();
+    let (x0, y0) = ((100.3f32 * 640.0 / 720.0).round() as usize, 45);
+    for x in x0..x0 + 80 {
+        let want = if ((x - x0) / 8) % 2 == 0 { 255 } else { 0 };
+        let got = at(&frame, 640, x, y0 + 4)[0];
+        assert_eq!(got, want, "column {x} of the face is resampled");
+    }
+    c.fit((OUT_W, OUT_H));
+}

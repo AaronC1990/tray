@@ -41,6 +41,7 @@ impl ApplicationHandler for Slot {
                 return;
             }
         };
+        compositor.fit(surface.window_size());
         self.frontend.upload_faces(&mut compositor);
         self.frontend
             .upload_bezel(&mut compositor, surface.window_size());

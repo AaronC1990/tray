@@ -178,6 +178,8 @@ impl Compositor {
         }
         self.tex = tex;
         self.size = size;
+        self.sprites
+            .set_scale([size.0 as f32 / OUT_W as f32, size.1 as f32 / OUT_H as f32]);
     }
 
     pub fn set_frame_split(&mut self, canvas_y: Option<f32>) {
