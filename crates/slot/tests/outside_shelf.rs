@@ -78,3 +78,34 @@ fn one_cart_is_a_shelf_not_the_whole_library() {
     press(&mut a, Btn::R1);
     assert_eq!(a.take_leave(), Some(1));
 }
+
+#[test]
+fn the_outside_shelf_is_drawn_in_slots_frame_and_named_in_the_slot() {
+    use slot::app::Outside;
+    use slot_gfx::Draw;
+    let (_d, mut a) = gba_and_gb();
+    let marker = Draw::Rect {
+        x: 1.0,
+        y: 2.0,
+        w: 3.0,
+        h: 4.0,
+        colour: [0.1, 0.2, 0.3, 1.0],
+    };
+    press(&mut a, Btn::L1);
+    assert_eq!(a.take_leave(), Some(-1));
+    a.set_outside(Some(Outside {
+        row: vec![marker],
+        seated: Vec::new(),
+    }));
+    a.say_in_slot("PlayStation");
+    assert_eq!(a.slot_text().as_deref(), Some("PlayStation"));
+    let mut out = Vec::new();
+    a.draw(&mut out);
+    assert!(out.contains(&marker), "the outside shelf was not drawn");
+
+    a.enter_shelves(1);
+    assert_eq!(a.slot_text().as_deref(), Some("Game Boy Advance"));
+    let mut out = Vec::new();
+    a.draw(&mut out);
+    assert!(!out.contains(&marker), "the outside shelf stayed up");
+}

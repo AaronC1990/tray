@@ -270,8 +270,21 @@ fn outside_shelf() -> bool {
     OUTSIDE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Another frontend's shelf, shown in place of slot's carts: what sits on
+/// the shelf, and what is passing through the slot, drawn between the
+/// slot's back and its front.
+#[derive(Clone, Debug, Default)]
+pub struct Outside {
+    pub row: Vec<Draw>,
+    pub seated: Vec<Draw>,
+}
+
 pub struct App {
     phase: Phase,
+    /// The outside shelf, while it is the one showing.
+    outside: Option<Outside>,
+    /// What the slot says while the outside shelf shows.
+    outside_text: Option<String>,
     /// Which way the shelf ring was left for the outside shelf, until taken.
     leaving: Option<i32>,
     shelves: Vec<(Platform, Shelf)>,
@@ -392,6 +405,8 @@ impl App {
         App {
             radio: radio_jobs(),
             phase: Phase::Shelf,
+            outside: None,
+            outside_text: None,
             leaving: None,
             shelves,
             shelf_at,
@@ -562,6 +577,7 @@ impl App {
     /// Comes back into the shelf ring from the outside shelf, moving `by`:
     /// onto the first shelf with carts going right, the last going left.
     pub fn enter_shelves(&mut self, by: i32) {
+        self.set_outside(None);
         let mut order: Vec<usize> = (0..self.shelves.len()).collect();
         if by < 0 {
             order.reverse();
@@ -573,6 +589,23 @@ impl App {
             self.show_shelf(to);
         }
         self.leaving = None;
+    }
+
+    /// Shows another frontend's shelf in place of slot's, or slot's again
+    /// with None. Set every frame the outside shelf is up.
+    pub fn set_outside(&mut self, outside: Option<Outside>) {
+        if outside.is_none() {
+            self.outside_text = None;
+        }
+        self.outside = outside;
+    }
+
+    /// Prints `text` in the slot the way slot names a shelf when it comes
+    /// up: faded in, held, and faded out.
+    pub fn say_in_slot(&mut self, text: &str) {
+        self.outside_text = Some(text.to_string());
+        self.shelf_named = None;
+        self.name_pending = true;
     }
 
     pub fn has_carts(&self) -> bool {
@@ -762,6 +795,9 @@ impl App {
     }
 
     pub fn slot_text(&self) -> Option<String> {
+        if self.outside.is_some() {
+            return self.outside_text.clone();
+        }
         match self.slot_letter {
             Some(letter) => Some(letter.to_string()),
             None => self.shelf_platform_name().map(str::to_string),
@@ -2046,6 +2082,22 @@ impl App {
                 faces: self.quick_menu_faces.as_ref(),
             }
             .draw(out),
+            Phase::Shelf if self.outside.is_some() => {
+                let outside = self.outside.as_ref().expect("checked above");
+                draw_backdrop(self.wallpaper, out);
+                out.extend_from_slice(&outside.row);
+                slot_ui::draw_slot_back(1.0, out);
+                out.extend_from_slice(&outside.seated);
+                slot_ui::draw_slot_front(1.0, out);
+                draw_slot_name(self.shelf_platform, self.slot_name_alpha(), out);
+                draw_footer(
+                    self.battery,
+                    self.battery_percent,
+                    self.bolt,
+                    self.shelf_clock,
+                    out,
+                );
+            }
             Phase::Shelf => {
                 draw_backdrop(self.wallpaper, out);
                 match (self.core_picker_shown(), self.selected_stem()) {

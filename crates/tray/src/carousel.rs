@@ -18,6 +18,8 @@ pub enum Pick {
     Play(usize),
     /// Move to the next system's shelf, -1 for left and 1 for right.
     Switch(i32),
+    /// The pick jumped to another letter, which slot shows in its slot.
+    Letter(char),
 }
 
 pub struct Carousel {
@@ -48,9 +50,9 @@ impl Carousel {
 
     /// Moves to the first disc of the next letter, or of this letter's
     /// previous one going back, as slot's shelf does with Up and Down.
-    fn jump_letter(&mut self, dir: i32) {
+    fn jump_letter(&mut self, dir: i32) -> Option<Pick> {
         if self.len == 0 {
-            return;
+            return None;
         }
         let at = self.selected();
         let letter = |i: usize| self.initials[i];
@@ -69,16 +71,18 @@ impl Carousel {
         };
         let to = match (to, self.wraps(), dir > 0) {
             (Some(to), _, _) => to,
-            (None, false, _) => return,
+            (None, false, _) => return None,
             (None, true, true) => 0,
             (None, true, false) => start_of(self.len - 1),
         };
-        if to != at {
-            // Slide the way the jump goes, even when it wraps round.
-            let n = self.len as i64;
-            let ahead = (to as i64 - at as i64).rem_euclid(n);
-            self.step(if dir > 0 { ahead } else { ahead - n });
+        if to == at {
+            return None;
         }
+        // Slide the way the jump goes, even when it wraps round.
+        let n = self.len as i64;
+        let ahead = (to as i64 - at as i64).rem_euclid(n);
+        self.step(if dir > 0 { ahead } else { ahead - n });
+        Some(Pick::Letter(self.initials[to]))
     }
 
     pub fn len(&self) -> usize {
@@ -120,8 +124,8 @@ impl Carousel {
             }
             RawEvent::Down(Btn::L1) => return Some(Pick::Switch(-1)),
             RawEvent::Down(Btn::R1) => return Some(Pick::Switch(1)),
-            RawEvent::Down(Btn::Up) => self.jump_letter(-1),
-            RawEvent::Down(Btn::Down) => self.jump_letter(1),
+            RawEvent::Down(Btn::Up) => return self.jump_letter(-1),
+            RawEvent::Down(Btn::Down) => return self.jump_letter(1),
             RawEvent::Up(b) if self.held.is_some_and(|(h, _)| h == b) => self.held = None,
             _ => {}
         }

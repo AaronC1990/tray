@@ -1,29 +1,20 @@
-//! Discs going into the drive at the bottom of the shelf and coming back
-//! out, as slot's carts go into its slot: the picked disc slides down into
-//! the slit to play, rises back out on quitting, and for a disc change the
-//! old disc comes out and the next goes in. The core is told when the lid
-//! opens and shuts, as a console's drive would tell it.
+//! Discs going into slot's slot and coming back out, timed and moved as
+//! slot moves its carts, with slot's sounds: the picked disc goes in to
+//! play, comes out on quitting, and for a disc change the old disc comes
+//! out and the next goes in. The core is told when the lid opens and
+//! shuts, as a console's drive would tell it.
 use std::path::Path;
+
+use slot::audio::Sfx;
+use slot_gfx::Compositor;
 
 use crate::disc::{disc_face, label_art};
 use crate::library::Game;
 use crate::play::DiscGame;
-use crate::shelf::{Look, ShelfView, BIG};
+use crate::shelf::{Look, ShelfView, BIG, INSERT_S, IN_S, OUT_S};
 
 fn ease(u: f32) -> f32 {
-    let u = u.clamp(0.0, 1.0);
-    u * u * (3.0 - 2.0 * u)
-}
-
-/// Slow to start and quick to finish, like a disc pulled in by the drive.
-fn ease_in(u: f32) -> f32 {
-    let u = u.clamp(0.0, 1.0);
-    u * u * u
-}
-
-/// Quick to start and slow to finish, like a disc pushed out by the drive.
-fn ease_out(u: f32) -> f32 {
-    1.0 - ease_in(1.0 - u)
+    slot_ui::ease(u.clamp(0.0, 1.0))
 }
 
 fn span(t: f32, from: f32, to: f32) -> f32 {
@@ -35,6 +26,11 @@ fn span(t: f32, from: f32, to: f32) -> f32 {
 fn dip(t: f32, from: f32, to: f32) -> f32 {
     let mid = (from + to) / 2.0;
     ease(span(t, from, mid)) * (1.0 - ease(span(t, mid, to)))
+}
+
+/// Whether `t` crossed `at` going from `was`.
+fn crossed(was: f32, t: f32, at: f32) -> bool {
+    was < at && t >= at
 }
 
 /// Disc `index` of `game` as a face: its own label art if the card has it,
@@ -61,40 +57,38 @@ pub fn disc_label(labels: &Path, game: &Game, index: u32, size: u32) -> Vec<u8> 
     )
 }
 
-/// The picked disc going into the drive. It slides down into the slit
-/// while the rest of the shelf fades, the drive's light comes on, and the
-/// game loads. Then the screen dips to black and the game comes up.
+/// The picked disc going into the slot as slot seats a cart. The game
+/// loads once it is seated, then the screen dips to black and the game
+/// comes up.
 pub struct Insert {
     t: f32,
-    depth: f32,
     loaded: bool,
 }
 
 impl Insert {
-    /// As slot seats a cart: in, then a beat with it seated.
-    const IN: f32 = 0.45;
-    const SEATED: f32 = 0.73;
     const GONE: f32 = 0.15;
 
-    pub fn start(view: &ShelfView) -> Insert {
+    pub fn start() -> Insert {
         Insert {
             t: 0.0,
-            depth: view.into_drive(),
             loaded: false,
         }
     }
 
-    /// Moves `dt` seconds on. It waits with the disc seated until `loaded`.
-    pub fn tick(&mut self, dt: f32) {
+    /// Moves `dt` seconds on, waiting seated until `loaded`. Returns a
+    /// sound to play, if one is due.
+    pub fn tick(&mut self, dt: f32) -> Option<Sfx> {
+        let was = self.t;
         self.t += dt;
         if !self.loaded {
-            self.t = self.t.min(Self::SEATED);
+            self.t = self.t.min(INSERT_S);
         }
+        crossed(was, self.t, IN_S - Sfx::Insert.lead()).then_some(Sfx::Insert)
     }
 
-    /// Whether the disc is in and the game should load now.
+    /// Whether the disc is seated and the game should load now.
     pub fn ready_to_load(&self) -> bool {
-        !self.loaded && self.t >= Self::SEATED
+        !self.loaded && self.t >= INSERT_S
     }
 
     pub fn loaded(&mut self) {
@@ -103,23 +97,20 @@ impl Insert {
 
     /// Whether the screen has dipped to black and the game can show.
     pub fn done(&self) -> bool {
-        self.loaded && self.t >= Self::SEATED + Self::GONE
+        self.loaded && self.t >= INSERT_S + Self::GONE
     }
 
-    pub fn look(&self) -> Look<'static> {
-        let t = self.t;
-        let fade = 1.0 - ease(span(t, 0.0, Self::IN * 0.7));
+    pub fn look(&self) -> Look {
+        let seat = (self.t / IN_S).min(1.0);
         Look {
-            picked: (0.0, ease_in(span(t, 0.0, Self::IN)) * self.depth),
-            others: fade,
-            title_alpha: fade,
-            light: if t >= Self::IN { 1.0 } else { 0.0 },
+            seat,
+            recede: seat,
             ..Look::default()
         }
     }
 
     pub fn veil(&self) -> f32 {
-        ease(span(self.t, Self::SEATED, Self::SEATED + Self::GONE))
+        ease(span(self.t, INSERT_S, INSERT_S + Self::GONE))
     }
 
     /// The insert as it stands `t` seconds in, for stills.
@@ -130,44 +121,35 @@ impl Insert {
     }
 }
 
-/// The disc coming back out after a game: the shelf comes up out of black
-/// with the disc in the drive, the disc rises out to its place, and the
-/// rest of the shelf fades back in.
+/// The disc coming back out after a game, as slot ejects a cart: the shelf
+/// comes up out of black with the disc seated, and it comes out to its
+/// place while the other discs come back.
 pub struct Eject {
     t: f32,
-    depth: f32,
 }
 
 impl Eject {
-    const SHOWN: f32 = 0.15;
-    const HOLD: f32 = 0.3;
-    const OUT: f32 = 0.75;
-    const DONE: f32 = 0.95;
+    const SHOWN: f32 = 0.12;
 
-    pub fn start(view: &ShelfView) -> Eject {
-        Eject {
-            t: 0.0,
-            depth: view.into_drive(),
-        }
+    pub fn start() -> Eject {
+        Eject { t: 0.0 }
     }
 
-    pub fn tick(&mut self, dt: f32) {
+    pub fn tick(&mut self, dt: f32) -> Option<Sfx> {
+        let was = self.t;
         self.t += dt;
+        crossed(was, self.t, Self::SHOWN).then_some(Sfx::Eject)
     }
 
     pub fn done(&self) -> bool {
-        self.t >= Self::DONE
+        self.t >= Self::SHOWN + OUT_S
     }
 
-    pub fn look(&self) -> Look<'static> {
-        let t = self.t;
-        let out = ease_out(span(t, Self::HOLD, Self::OUT));
-        let back = ease(span(t, Self::OUT - 0.15, Self::DONE));
+    pub fn look(&self) -> Look {
+        let seat = 1.0 - span(self.t, Self::SHOWN, Self::SHOWN + OUT_S);
         Look {
-            picked: (0.0, (1.0 - out) * self.depth),
-            others: back,
-            title_alpha: back,
-            light: if t < Self::HOLD { 1.0 } else { 0.0 },
+            seat,
+            recede: seat,
             ..Look::default()
         }
     }
@@ -183,16 +165,13 @@ impl Eject {
     }
 }
 
-/// Changing discs mid-game: the game dips to the shelf's drive, the old
-/// disc rises out and slides away, the next slides in and goes down into
-/// the drive, and the game comes back. The core keeps running underneath
-/// so the game sees the lid open and close.
+/// Changing discs mid-game: the game dips to the shelf with the disc
+/// seated, it comes out of the slot and slides away, the next slides in
+/// and goes into the slot, and the game comes back. The core keeps running
+/// underneath so the game sees the lid open and close.
 pub struct Swap {
     t: f32,
     to: u32,
-    depth: f32,
-    width: f32,
-    caption: String,
     opened: bool,
     swapped: bool,
     shut: bool,
@@ -200,48 +179,52 @@ pub struct Swap {
 
 impl Swap {
     const SHOWN: f32 = 0.2;
-    const RISEN: f32 = 0.55;
-    const TAKEN: f32 = 0.8;
-    const BROUGHT: f32 = 1.05;
-    const IN: f32 = 1.4;
-    const DONE: f32 = 1.6;
+    const OUT: f32 = Self::SHOWN + OUT_S;
+    const AWAY: f32 = Self::OUT + 0.25;
+    const BACK: f32 = Self::AWAY + 0.25;
+    const IN: f32 = Self::BACK + IN_S;
+    const HELD: f32 = Self::IN + 0.15;
+    const DONE: f32 = Self::HELD + 0.2;
+    /// How far a disc slides to be off the shelf, in canvas units.
+    const REACH: f32 = 560.0;
 
     /// Starts changing `game` from disc `from` to `to`, both from 0. Puts
     /// both discs' faces in the shelf's spare faces.
-    #[allow(clippy::too_many_arguments)]
     pub fn start(
         view: &mut ShelfView,
-        overlay: &mut slot_gfx::Overlay,
+        compositor: &mut Compositor,
         labels: &Path,
         game: &Game,
         from: u32,
         to: u32,
-        count: u32,
-        panel_w: f32,
     ) -> Swap {
-        view.set_spare(overlay, 0, &disc_label(labels, game, from, BIG));
-        view.set_spare(overlay, 1, &disc_label(labels, game, to, BIG));
+        view.set_spare(compositor, 0, &disc_label(labels, game, from, BIG));
+        view.set_spare(compositor, 1, &disc_label(labels, game, to, BIG));
         Swap {
             t: 0.0,
             to,
-            depth: view.into_drive(),
-            width: panel_w,
-            caption: format!("Disc {} of {count}", to + 1),
             opened: false,
             swapped: false,
             shut: false,
         }
     }
 
+    /// What the slot says while the discs change.
+    pub fn caption(&self) -> String {
+        format!("Disc {}", self.to + 1)
+    }
+
     /// Moves `dt` seconds on, opening the lid, changing the disc and
-    /// shutting the lid in the core as the picture does. True once done.
-    pub fn tick(&mut self, dt: f32, game: &mut DiscGame) -> bool {
+    /// shutting the lid in the core as the picture does. Returns a sound
+    /// to play, if one is due.
+    pub fn tick(&mut self, dt: f32, game: &mut DiscGame) -> Option<Sfx> {
+        let was = self.t;
         self.t += dt;
         if !self.opened && self.t >= Self::SHOWN {
             self.opened = true;
             game.set_lid_open(true);
         }
-        if !self.swapped && self.t >= Self::TAKEN {
+        if !self.swapped && self.t >= Self::AWAY {
             self.swapped = true;
             game.set_disc(self.to);
         }
@@ -249,46 +232,44 @@ impl Swap {
             self.shut = true;
             game.set_lid_open(false);
         }
+        if crossed(was, self.t, Self::SHOWN) {
+            return Some(Sfx::Eject);
+        }
+        crossed(was, self.t, Self::IN - Sfx::Insert.lead()).then_some(Sfx::Insert)
+    }
+
+    pub fn done(&self) -> bool {
         self.t >= Self::DONE
     }
 
     /// Whether the shelf shows in place of the game.
     pub fn shows_shelf(&self) -> bool {
-        let half = Self::SHOWN / 2.0;
-        let back = Self::IN + (Self::DONE - Self::IN) / 2.0;
-        (half..back).contains(&self.t)
+        (Self::SHOWN / 2.0..Self::HELD + (Self::DONE - Self::HELD) / 2.0).contains(&self.t)
     }
 
     pub fn veil(&self) -> f32 {
-        dip(self.t, 0.0, Self::SHOWN) + dip(self.t, Self::IN, Self::DONE)
+        dip(self.t, 0.0, Self::SHOWN) + dip(self.t, Self::HELD, Self::DONE)
     }
 
-    pub fn look(&self) -> Look<'_> {
+    pub fn look(&self) -> Look {
         let t = self.t;
-        let reach = self.width * 0.75;
-        let (picked, face) = match t < Self::TAKEN {
-            true => {
-                let up = 1.0 - ease_out(span(t, Self::SHOWN, Self::RISEN));
-                let away = ease_in(span(t, Self::RISEN, Self::TAKEN));
-                ((away * reach, up * self.depth), 0)
-            }
-            false => {
-                let come = 1.0 - ease_out(span(t, Self::TAKEN, Self::BROUGHT));
-                let down = ease_in(span(t, Self::BROUGHT, Self::IN));
-                ((-come * reach, down * self.depth), 1)
-            }
+        let (seat, dx, face) = match t < Self::AWAY {
+            true => (
+                1.0 - span(t, Self::SHOWN, Self::OUT),
+                ease(span(t, Self::OUT, Self::AWAY)) * Self::REACH,
+                0,
+            ),
+            false => (
+                span(t, Self::BACK, Self::IN),
+                -(1.0 - ease(span(t, Self::AWAY, Self::BACK))) * Self::REACH,
+                1,
+            ),
         };
         Look {
-            picked,
+            seat,
+            recede: 1.0,
+            dx,
             face: Some(face),
-            others: 0.0,
-            title: Some(&self.caption),
-            title_alpha: 1.0,
-            light: if (Self::RISEN..Self::BROUGHT).contains(&t) {
-                0.0
-            } else {
-                1.0
-            },
         }
     }
 

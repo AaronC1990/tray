@@ -196,7 +196,8 @@ fn band(x: f32, y: f32, w: f32, h: f32, c: [f32; 4], alpha: f32) -> Draw {
     }
 }
 
-fn draw_slot_back(alpha: f32, out: &mut Vec<Draw>) {
+/// The slot's back, which a cart going in passes in front of.
+pub fn draw_slot_back(alpha: f32, out: &mut Vec<Draw>) {
     out.push(band(BAY_X, BAND_Y, BAY_W, LIP_H, housing(), alpha));
     out.push(band(MOUTH_X, BAND_Y, MOUTH_W, LIP_H, edge(), alpha));
     out.push(band(BAY_X, BAY_Y, BAY_W, RECESS_H, recess(), alpha));
@@ -206,7 +207,8 @@ fn draw_slot_back(alpha: f32, out: &mut Vec<Draw>) {
     });
 }
 
-fn draw_slot_front(alpha: f32, out: &mut Vec<Draw>) {
+/// The slot's front, which hides a cart once it is past the slit.
+pub fn draw_slot_front(alpha: f32, out: &mut Vec<Draw>) {
     front_bands(|x, y, w, h, c| out.push(band(x, y, w, h, c, alpha)));
 }
 

@@ -512,6 +512,11 @@ impl Frontend {
         self.session.app_mut()
     }
 
+    /// Plays one of slot's sounds at slot's volume.
+    pub fn play_sfx(&mut self, sfx: crate::audio::Sfx) {
+        self.session.play_sfx(sfx);
+    }
+
     pub fn audio_sink(&mut self) -> &mut dyn crate::audio::AudioSink {
         self.session.sink_mut()
     }

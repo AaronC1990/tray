@@ -1,60 +1,71 @@
-//! Renders stills of a disc going into the drive, coming out, or being
-//! changed, as the panel shows them.
-//! `motion_shot <games dir> <out prefix> <insert|eject|swap> <t>...`
+//! Renders stills of the disc shelf as slot's frame shows it: still, or a
+//! disc going in, coming out or being changed. Slot's wallpaper, clock and
+//! name are left out; its slot is drawn.
+//! `motion_shot <games dir> <out prefix> <shelf|insert|eject|swap> <t>...`
 use std::path::Path;
 
-use slot_gfx::{Draw, HeadlessSurface, Overlay};
+use slot_gfx::{Compositor, Draw, HeadlessSurface};
 use tray::carousel::Carousel;
 use tray::library::scan;
 use tray::motion::{Eject, Insert, Swap};
-use tray::shelf::ShelfView;
+use tray::shelf::{Look, ShelfView};
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let games = scan(Path::new(&a[1]));
     let surface = HeadlessSurface::new().unwrap();
     let panel = (640u32, 480u32);
-    let mut overlay = Overlay::new(&surface, panel).unwrap();
+    let mut c = Compositor::new(&surface).unwrap();
+    c.fit(panel);
     let labels = Path::new("/none");
-    let mut view = ShelfView::new(&mut overlay, panel, labels);
+    let mut view = ShelfView::new(&mut c, labels);
     let initials = games
         .iter()
         .map(|g| slot_store::initial(&g.title))
         .collect();
     let carousel = Carousel::new(initials, 0);
-    let black = |alpha: f32| Draw::Rect {
-        x: 0.0,
-        y: 0.0,
-        w: 640.0,
-        h: 480.0,
-        colour: [0.0, 0.0, 0.0, alpha],
-    };
     for t in &a[4..] {
         let t: f32 = t.parse().unwrap();
-        let veil = match a[3].as_str() {
+        let (look, veil) = match a[3].as_str() {
             "insert" => {
-                let m = Insert::start(&view).at(t, t > 0.73);
-                view.draw(&mut overlay, &games, &carousel, &m.look());
-                m.veil()
+                let m = Insert::start().at(t, t > 0.73);
+                (m.look(), m.veil())
             }
             "eject" => {
-                let m = Eject::start(&view).at(t);
-                view.draw(&mut overlay, &games, &carousel, &m.look());
-                m.veil()
+                let m = Eject::start().at(t);
+                (m.look(), m.veil())
             }
-            _ => {
-                let m =
-                    Swap::start(&mut view, &mut overlay, labels, &games[0], 0, 1, 2, 640.0).at(t);
-                match m.shows_shelf() {
-                    true => view.draw(&mut overlay, &games, &carousel, &m.look()),
-                    false => overlay.draw([0.2, 0.3, 0.5], &[]),
-                }
-                m.veil()
+            "swap" => {
+                let m = Swap::start(&mut view, &mut c, labels, &games[0], 0, 1).at(t);
+                (m.look(), m.veil())
             }
+            _ => (Look::default(), 0.0),
         };
-        overlay.draw_over(&[black(veil)]);
+        let d = view.draws(&mut c, &games, &carousel, &look);
+        let mut items = vec![Draw::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 720.0,
+            h: 480.0,
+            colour: [0.12, 0.13, 0.16, 1.0],
+        }];
+        items.extend(d.row);
+        slot_ui::draw_slot_back(1.0, &mut items);
+        items.extend(d.seated);
+        slot_ui::draw_slot_front(1.0, &mut items);
+        items.push(Draw::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 720.0,
+            h: 480.0,
+            colour: [0.0, 0.0, 0.0, veil],
+        });
+        c.begin_frame();
+        c.draw_list(&items);
+        c.end_frame(panel);
         let mut px = vec![0u8; 640 * 480 * 4];
         unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
             gl::ReadPixels(
                 0,
                 0,
