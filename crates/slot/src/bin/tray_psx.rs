@@ -19,9 +19,11 @@ const CORE: &str = "System/pcsx_rearmed_libretro.so";
 const GAMES: &str = "Games/PS";
 const SAVES: &str = "Saves/PS";
 
-/// Disc formats in the order a folder's games are tried: a playlist names
-/// every disc of a multi-disc game, so it beats the discs themselves.
-const KINDS: [&str; 6] = ["m3u", "cue", "chd", "pbp", "exe", "iso"];
+/// Disc formats in the order a folder's games are tried. A playlist names
+/// every disc of a multi-disc game, and a cue names a disc's audio tracks,
+/// so each beats the raw image it points at. A bare .exe, such as the test
+/// card, comes last so any real game plays ahead of it.
+const KINDS: [&str; 8] = ["m3u", "cue", "chd", "pbp", "bin", "img", "iso", "exe"];
 
 /// The panel's refresh, measured from swaps; slot found the RG SP's near
 /// this, and the first second of swaps corrects it for this panel.
@@ -36,6 +38,9 @@ fn first_disc(dir: &Path) -> Option<PathBuf> {
         .filter(|p| kind_rank(p).is_some())
         .collect();
     found.sort_by_key(|p| (kind_rank(p), p.clone()));
+    for p in &found {
+        eprintln!("tray-psx: found {}", p.display());
+    }
     found.into_iter().next()
 }
 
