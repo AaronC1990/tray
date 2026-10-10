@@ -160,6 +160,12 @@ impl Ring {
         }
     }
 
+    /// Samples taken out of the ring for playback since it was made, both
+    /// channels counted.
+    pub fn drained_samples(&self) -> u64 {
+        self.lock().drained
+    }
+
     pub fn queued_frames(&self) -> usize {
         self.queued.load(Ordering::Relaxed) / 2
     }

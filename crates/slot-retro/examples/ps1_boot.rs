@@ -16,6 +16,16 @@ fn main() {
     let mut c = LibretroCore::open_with(Path::new(core), Path::new(system), Path::new(out))
         .expect("open core");
     c.set_native_video(true);
+    if std::env::var_os("PS1_DEFAULTS").is_some() {
+        c.set_answer_defaults(true);
+    }
+    if std::env::var_os("PS1_LIST_OPTIONS").is_some() {
+        let mut keys: Vec<_> = c.declared_options().iter().collect();
+        keys.sort();
+        for (k, v) in keys {
+            println!("option {k}: {}", v.join("|"));
+        }
+    }
     println!("needs full path: {}", c.needs_full_path());
     c.load(Path::new(content)).expect("load content");
     let av = c.av_info();
@@ -37,4 +47,8 @@ fn main() {
         }
     }
     println!("audio samples over {last} frames: {audio}");
+    let threads = std::fs::read_dir("/proc/self/task")
+        .map(|d| d.count())
+        .unwrap_or(0);
+    println!("threads: {threads}");
 }

@@ -105,6 +105,10 @@ struct Host {
     options: std::collections::HashMap<String, std::ffi::CString>,
     options_dirty: bool,
     declared: std::collections::HashMap<String, Vec<String>>,
+    /// Answer an option nobody set with the default the core declared for
+    /// it, as the libretro spec asks, rather than leaving it unanswered.
+    answer_defaults: bool,
+    defaults: std::collections::HashMap<String, CString>,
 }
 
 thread_local! {
@@ -187,14 +191,17 @@ unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
             let Ok(key) = std::ffi::CStr::from_ptr(var.key).to_str() else {
                 return false;
             };
-            with_host(|h| match h.options.get(key) {
-                Some(value) => {
-                    var.value = value.as_ptr();
-                    true
-                }
-                None => {
-                    var.value = ptr::null();
-                    false
+            with_host(|h| {
+                let fallback = h.answer_defaults.then(|| h.defaults.get(key)).flatten();
+                match h.options.get(key).or(fallback) {
+                    Some(value) => {
+                        var.value = value.as_ptr();
+                        true
+                    }
+                    None => {
+                        var.value = ptr::null();
+                        false
+                    }
                 }
             })
             .unwrap_or(false)
@@ -243,7 +250,14 @@ unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
                 list.insert(key.to_string(), values);
                 p = p.add(1);
             }
-            with_host(|h| h.declared = list).is_some()
+            with_host(|h| {
+                h.defaults = list
+                    .iter()
+                    .filter_map(|(k, v)| Some((k.clone(), CString::new(v.first()?.as_str()).ok()?)))
+                    .collect();
+                h.declared = list;
+            })
+            .is_some()
         }
         GET_RUMBLE_INTERFACE => {
             if data.is_null() {
@@ -477,6 +491,14 @@ impl LibretroCore {
             .inspect_err(|_| LIVE.store(false, Ordering::SeqCst))
     }
 
+    /// Answers the core's requests for options nobody has set with the
+    /// defaults it declared. Some cores, PCSX ReARMed among them, only turn
+    /// on a declared default such as threaded rendering when it is answered.
+    pub fn set_answer_defaults(&mut self, on: bool) {
+        self.host.answer_defaults = on;
+        self.host.options_dirty = true;
+    }
+
     /// Keeps each frame at the size the core sends it rather than fitting it
     /// into the 240x160 GBA picture. Read it with `frame`.
     pub fn set_native_video(&mut self, on: bool) {
@@ -581,6 +603,8 @@ impl LibretroCore {
             options: std::collections::HashMap::new(),
             options_dirty: false,
             declared: std::collections::HashMap::new(),
+            answer_defaults: false,
+            defaults: std::collections::HashMap::new(),
         });
         unsafe {
             let _a = Active::bind(&mut host);
@@ -804,6 +828,8 @@ mod tests {
             options,
             options_dirty,
             declared: HashMap::new(),
+            answer_defaults: false,
+            defaults: HashMap::new(),
         })
     }
 
@@ -983,6 +1009,52 @@ mod tests {
 
         assert!(!ok);
         assert!(var.value.is_null());
+    }
+
+    fn declare_and_ask(answer_defaults: bool, set: Option<&str>) -> Option<String> {
+        let mut options = HashMap::new();
+        if let Some(v) = set {
+            options.insert("core_threads".to_string(), CString::new(v).unwrap());
+        }
+        let mut host = host_with(options, false);
+        host.answer_defaults = answer_defaults;
+        let _active = Active::bind(&mut host);
+        let (declared, _k, _v) = declaration("core_threads", "Threads; auto|disabled|enabled");
+        let list = [declared, end_of_list()];
+        unsafe { environment(SET_VARIABLES, list.as_ptr() as *mut c_void) };
+        let key = CString::new("core_threads").unwrap();
+        let mut var = Variable {
+            key: key.as_ptr(),
+            value: ptr::null(),
+        };
+        let ok = unsafe { environment(GET_VARIABLE, &mut var as *mut Variable as *mut c_void) };
+        match ok {
+            true => Some(
+                unsafe { CStr::from_ptr(var.value) }
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            ),
+            false => None,
+        }
+    }
+
+    #[test]
+    fn an_unset_option_is_answered_with_its_declared_default_when_asked_to() {
+        assert_eq!(declare_and_ask(true, None).as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn an_unset_option_goes_unanswered_by_default_as_before() {
+        assert_eq!(declare_and_ask(false, None), None);
+    }
+
+    #[test]
+    fn a_set_option_wins_over_its_declared_default() {
+        assert_eq!(
+            declare_and_ask(true, Some("enabled")).as_deref(),
+            Some("enabled")
+        );
     }
 
     #[test]

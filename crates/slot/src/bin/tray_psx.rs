@@ -103,6 +103,9 @@ fn main() {
         Err(e) => return eprintln!("tray-psx: core: {e}"),
     };
     core.set_native_video(true);
+    // PCSX ReARMed turns on declared defaults such as threaded rendering
+    // only when they are answered; unanswered, it renders on this thread.
+    core.set_answer_defaults(true);
     if let Err(e) = core.load(&disc) {
         return eprintln!("tray-psx: load: {e}");
     }
@@ -132,6 +135,8 @@ fn main() {
     let mut slow = 0u32;
     let mut frames = 0u64;
     let mut times = Times::default();
+    let mut pushed = 0u64;
+    let mut window = (Instant::now(), 0u64, ring.drained_samples());
     loop {
         for ev in input.poll(started.elapsed().as_millis() as u64) {
             match ev {
@@ -154,6 +159,7 @@ fn main() {
         resampler.set_ratio(drc_ratio(ring.queued_frames(), target));
         resampler.process(&audio, &mut out);
         ring.push(&out);
+        pushed += out.len() as u64;
 
         let (px, w, h, format) = core.frame_raw();
         match format {
@@ -202,6 +208,17 @@ fn main() {
                 h
             );
             eprintln!("tray-psx:   {}", times.report());
+            let (since, was_pushed, was_drained) = window;
+            let secs = since.elapsed().as_secs_f64();
+            let drained = ring.drained_samples();
+            eprintln!(
+                "tray-psx:   audio Hz: made {:.0}, played {:.0}, queued {} of {} frames",
+                (pushed - was_pushed) as f64 / 2.0 / secs,
+                (drained - was_drained) as f64 / 2.0 / secs,
+                ring.queued_frames(),
+                ring.capacity_frames()
+            );
+            window = (Instant::now(), pushed, drained);
             times = Times::default();
         }
     }

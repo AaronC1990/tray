@@ -80,6 +80,7 @@ impl Alsa {
     }
 
     fn open_pcm(&self, rate: u32) -> Result<*mut c_void, AudioError> {
+        let started = std::time::Instant::now();
         let mut last = AudioError::NoDevice;
         for name in DEVICES {
             let Ok(cname) = CString::new(name) else {
@@ -107,7 +108,10 @@ impl Alsa {
                 last = AudioError::Config(format!("{name}: {}", self.message(err)));
                 continue;
             }
-            eprintln!("slot: audio {name} at {rate} Hz");
+            eprintln!(
+                "slot: audio {name} at {rate} Hz, opened in {} ms",
+                started.elapsed().as_millis()
+            );
             return Ok(pcm);
         }
         Err(last)
