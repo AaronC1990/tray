@@ -1,4 +1,4 @@
-use slot_gfx::{fit_4x3, HeadlessSurface, PicturePass};
+use slot_gfx::{fit_4x3, FrameLayout, HeadlessSurface, PicturePass};
 use std::sync::{Mutex, PoisonError};
 
 static GL: Mutex<()> = Mutex::new(());
@@ -21,10 +21,14 @@ fn frame(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
 }
 
 fn shoot(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 3]) -> Option<Vec<u8>> {
+    shoot_as(FrameLayout::Xrgb8888, &frame(w, h, px), w, h)
+}
+
+fn shoot_as(layout: FrameLayout, pixels: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     let _g = GL.lock().unwrap_or_else(PoisonError::into_inner);
     let surface = HeadlessSurface::new().ok()?;
     let mut pass = PicturePass::new(&surface).ok()?;
-    pass.upload(&frame(w, h, px), w, h);
+    pass.upload_as(layout, pixels, w, h);
     pass.draw((640, 480));
     let mut out = vec![0u8; 640 * 480 * 4];
     unsafe {
@@ -96,7 +100,7 @@ fn a_256_wide_frame_still_fills_the_screen_with_even_pixels() {
         .map(|x| at(&img, x, 200)[0] as f32 / 255.0)
         .collect();
     let scale = 2.5f32;
-    for x in 0..640usize {
+    for (x, &got) in lit.iter().enumerate() {
         let (a, b) = (x as f32 / scale, (x + 1) as f32 / scale);
         let want: f32 = (a.floor() as usize..=(b - 1e-4).floor() as usize)
             .filter(|t| t % 2 == 0)
@@ -104,9 +108,40 @@ fn a_256_wide_frame_still_fills_the_screen_with_even_pixels() {
             .sum::<f32>()
             / (b - a);
         assert!(
-            (lit[x] - want).abs() <= 0.03,
-            "column {x}: {} where white covers {want}",
-            lit[x]
+            (got - want).abs() <= 0.03,
+            "column {x}: {got} where white covers {want}"
         );
+    }
+}
+
+#[test]
+fn a_16_bit_frame_lands_at_2x_with_its_colours_widened() {
+    let px565 =
+        |x: u32, y: u32| -> u16 { ((x % 32) << 11 | (y % 64) << 5 | ((x + y) % 32)) as u16 };
+    let raw: Vec<u8> = (0..240u32)
+        .flat_map(|y| (0..320u32).map(move |x| (x, y)))
+        .flat_map(|(x, y)| px565(x, y).to_le_bytes())
+        .collect();
+    let Some(img) = shoot_as(FrameLayout::Rgb565, &raw, 320, 240) else {
+        return;
+    };
+    let widen =
+        |v: u16, bits: u32| ((v as f32) * 255.0 / ((1u32 << bits) - 1) as f32).round() as i32;
+    for y in (0..240).step_by(7) {
+        for x in (0..320).step_by(5) {
+            let p = px565(x, y);
+            let want = [
+                widen(p >> 11, 5),
+                widen((p >> 5) & 0x3f, 6),
+                widen(p & 0x1f, 5),
+            ];
+            let got = at(&img, (x * 2 + 1) as usize, (y * 2 + 1) as usize);
+            for c in 0..3 {
+                assert!(
+                    (got[c] as i32 - want[c]).abs() <= 1,
+                    "frame pixel {x},{y}: {got:?} against {want:?}"
+                );
+            }
+        }
     }
 }

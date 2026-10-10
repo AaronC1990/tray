@@ -53,10 +53,37 @@ void main() {
 
 /// Draws one frame of any size across the panel's 4:3 area, for cores
 /// whose picture is not slot's fixed 240x160.
+/// How a frame's pixels are laid out in memory.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum FrameLayout {
+    /// Four bytes a pixel: B, G, R, X.
+    Xrgb8888,
+    /// Two bytes a pixel, little endian, red in the top five bits. The GPU
+    /// takes these as they are, half the upload of the same frame widened.
+    Rgb565,
+}
+
+impl FrameLayout {
+    fn bytes(self) -> u32 {
+        match self {
+            FrameLayout::Xrgb8888 => 4,
+            FrameLayout::Rgb565 => 2,
+        }
+    }
+
+    fn gl(self) -> (gl::types::GLenum, gl::types::GLenum) {
+        match self {
+            FrameLayout::Xrgb8888 => (gl::BGRA, gl::UNSIGNED_BYTE),
+            FrameLayout::Rgb565 => (gl::RGB, gl::UNSIGNED_SHORT_5_6_5),
+        }
+    }
+}
+
 pub struct PicturePass {
     prog: gl::types::GLuint,
     tex: gl::types::GLuint,
     size: (u32, u32),
+    layout: FrameLayout,
     u_src: gl::types::GLint,
     u_scale: gl::types::GLint,
     quad: Quad,
@@ -78,6 +105,7 @@ impl PicturePass {
             prog,
             tex,
             size: (1, 1),
+            layout: FrameLayout::Xrgb8888,
             u_src,
             u_scale,
             quad: Quad::new(),
@@ -86,39 +114,53 @@ impl PicturePass {
 
     /// Takes a frame as XRGB8888 (B, G, R, X in memory), row 0 at the top.
     pub fn upload(&mut self, xrgb: &[u8], w: u32, h: u32) {
-        if w == 0 || h == 0 || xrgb.len() < (w * h * 4) as usize {
+        self.upload_as(FrameLayout::Xrgb8888, xrgb, w, h);
+    }
+
+    /// Takes a frame of packed rows in `layout`, row 0 at the top.
+    pub fn upload_as(&mut self, layout: FrameLayout, pixels: &[u8], w: u32, h: u32) {
+        let bytes = (w * h * layout.bytes()) as usize;
+        if w == 0 || h == 0 || pixels.len() < bytes {
             return;
         }
+        let (format, kind) = layout.gl();
+        let data = pixels.as_ptr() as *const std::ffi::c_void;
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, self.tex);
             gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
-        }
-        if (w, h) != self.size {
-            unsafe { gl::DeleteTextures(1, &self.tex) };
-            self.tex = crate::gl::texture(
-                w,
-                h,
-                gl::LINEAR,
-                gl::CLAMP_TO_EDGE,
-                gl::BGRA,
-                Some(&xrgb[..(w * h * 4) as usize]),
-            );
-            self.size = (w, h);
-            return;
-        }
-        unsafe {
-            gl::TexSubImage2D(
+            if (w, h) == self.size && layout == self.layout {
+                gl::TexSubImage2D(
+                    gl::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    format,
+                    kind,
+                    data,
+                );
+                return;
+            }
+            let internal = match (crate::gl::es(), layout) {
+                (true, _) => format as gl::types::GLint,
+                (false, FrameLayout::Xrgb8888) => gl::RGBA8 as gl::types::GLint,
+                (false, FrameLayout::Rgb565) => gl::RGB8 as gl::types::GLint,
+            };
+            gl::TexImage2D(
                 gl::TEXTURE_2D,
                 0,
-                0,
-                0,
+                internal,
                 w as i32,
                 h as i32,
-                gl::BGRA,
-                gl::UNSIGNED_BYTE,
-                xrgb.as_ptr() as *const std::ffi::c_void,
+                0,
+                format,
+                kind,
+                data,
             );
         }
+        self.size = (w, h);
+        self.layout = layout;
     }
 
     pub fn size(&self) -> (u32, u32) {

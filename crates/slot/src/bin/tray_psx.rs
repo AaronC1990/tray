@@ -10,9 +10,9 @@ use slot::audio::open_sink;
 use slot::drc::{drc_ratio, drc_target};
 use slot::input::DeviceInput;
 use slot::resample::Resampler;
-use slot_gfx::{FbdevSurface, PicturePass, Surface};
+use slot_gfx::{FbdevSurface, FrameLayout, PicturePass, Surface};
 use slot_input::{Btn, InputSource, RawEvent};
-use slot_retro::{ButtonMask, LibretroCore, RetroCore};
+use slot_retro::{to_xrgb8888, ButtonMask, LibretroCore, PixelFormat, RetroCore};
 
 const CARD: &str = "/mnt/sdcard";
 const CORE: &str = "System/pcsx_rearmed_libretro.so";
@@ -131,6 +131,7 @@ fn main() {
     let mut swaps = Vec::with_capacity(64);
     let mut slow = 0u32;
     let mut frames = 0u64;
+    let mut times = Times::default();
     loop {
         for ev in input.poll(started.elapsed().as_millis() as u64) {
             match ev {
@@ -147,21 +148,28 @@ fn main() {
 
         let work = Instant::now();
         core.run_frame(ButtonMask(pad));
+        let emulated = Instant::now();
         let audio = core.take_audio();
         let target = drc_target(ring.capacity_frames());
         resampler.set_ratio(drc_ratio(ring.queued_frames(), target));
         resampler.process(&audio, &mut out);
         ring.push(&out);
 
-        let (px, w, h) = core.frame();
-        picture.upload(px, w, h);
-        if work.elapsed() > period {
+        let (px, w, h, format) = core.frame_raw();
+        match format {
+            PixelFormat::Rgb565 => picture.upload_as(FrameLayout::Rgb565, px, w, h),
+            PixelFormat::Xrgb8888 => picture.upload(px, w, h),
+            PixelFormat::Xrgb1555 => picture.upload(&to_xrgb8888(format, px, w, h), w, h),
+        }
+        let uploaded = Instant::now();
+        if uploaded - work > period {
             slow += 1;
         }
         picture.draw(panel);
         if let Err(e) = surface.swap() {
             eprintln!("tray-psx: swap: {e}");
         }
+        times.add(emulated - work, uploaded - emulated, uploaded.elapsed());
         frames += 1;
 
         // Learn the panel's real refresh from the first second of swaps,
@@ -193,6 +201,43 @@ fn main() {
                 w,
                 h
             );
+            eprintln!("tray-psx:   {}", times.report());
+            times = Times::default();
         }
+    }
+}
+
+/// Where each frame's time went, over the frames since the last report.
+#[derive(Default)]
+struct Times {
+    frames: u32,
+    emulate: (Duration, Duration),
+    upload: (Duration, Duration),
+    present: (Duration, Duration),
+}
+
+impl Times {
+    fn add(&mut self, emulate: Duration, upload: Duration, present: Duration) {
+        self.frames += 1;
+        for (slot, t) in [
+            (&mut self.emulate, emulate),
+            (&mut self.upload, upload),
+            (&mut self.present, present),
+        ] {
+            slot.0 += t;
+            slot.1 = slot.1.max(t);
+        }
+    }
+
+    fn report(&self) -> String {
+        let n = self.frames.max(1);
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let pair = |(sum, max): (Duration, Duration)| format!("{:.1}/{:.1}", ms(sum / n), ms(max));
+        format!(
+            "ms avg/max: emulate {}, upload {}, draw+swap {}",
+            pair(self.emulate),
+            pair(self.upload),
+            pair(self.present)
+        )
     }
 }

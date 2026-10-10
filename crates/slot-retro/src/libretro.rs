@@ -16,14 +16,39 @@ const VIDEO_BYTES: usize = (GBA_W * GBA_H * 4) as usize;
 
 static LIVE: AtomicBool = AtomicBool::new(false);
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum PixelFormat {
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum PixelFormat {
     Xrgb8888,
     Rgb565,
     Xrgb1555,
 }
 
 /// Writes one row of the core's pixels as XRGB8888 (B, G, R, X in memory).
+impl PixelFormat {
+    pub fn bytes_per_pixel(self) -> usize {
+        match self {
+            PixelFormat::Xrgb8888 => 4,
+            PixelFormat::Rgb565 | PixelFormat::Xrgb1555 => 2,
+        }
+    }
+}
+
+/// Converts a native frame, packed at `w` pixels a row in `format`, to
+/// XRGB8888 (B, G, R, X in memory).
+pub fn to_xrgb8888(format: PixelFormat, raw: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let (cols, rows) = (w as usize, h as usize);
+    let stride = cols * format.bytes_per_pixel();
+    let mut out = vec![0u8; cols * rows * 4];
+    if raw.len() < stride * rows {
+        return out;
+    }
+    for y in 0..rows {
+        let dst = &mut out[y * cols * 4..(y + 1) * cols * 4];
+        unsafe { put_row(format, raw.as_ptr().add(y * stride), dst, cols) };
+    }
+    out
+}
+
 unsafe fn put_row(format: PixelFormat, src: *const u8, dst: &mut [u8], cols: usize) {
     match format {
         PixelFormat::Xrgb8888 => {
@@ -60,11 +85,12 @@ unsafe fn put_row(format: PixelFormat, src: *const u8, dst: &mut [u8], cols: usi
 
 struct Host {
     video: Vec<u8>,
-    /// Frames kept at the core's own size, for cores whose picture is not
-    /// a fixed 240x160, such as a PlayStation's.
+    /// Frames kept at the core's own size and in its own pixel format, for
+    /// cores whose picture is not a fixed 240x160, such as a PlayStation's.
     native: bool,
     frame: Vec<u8>,
     frame_size: (u32, u32),
+    frame_format: PixelFormat,
     format: PixelFormat,
     audio: Vec<i16>,
     inputs: [u16; 2],
@@ -361,13 +387,16 @@ unsafe extern "C" fn video_refresh(
     }
     with_host(|h| {
         if h.native {
+            // Kept as the core sent it: converting here would cost a pass
+            // over every pixel, and the GPU takes these formats directly.
             let (cols, rows) = (width as usize, height as usize);
-            h.frame.resize(cols * rows * 4, 0);
+            let stride = cols * h.format.bytes_per_pixel();
+            h.frame.resize(stride * rows, 0);
             h.frame_size = (width, height);
+            h.frame_format = h.format;
             for y in 0..rows {
                 let src = (data as *const u8).add(y * pitch);
-                let row = y * cols * 4;
-                put_row(h.format, src, &mut h.frame[row..row + cols * 4], cols);
+                ptr::copy_nonoverlapping(src, h.frame.as_mut_ptr().add(y * stride), stride);
             }
             return;
         }
@@ -454,14 +483,18 @@ impl LibretroCore {
         self.host.native = on;
     }
 
-    /// The last frame in native mode, as XRGB8888 (B, G, R, X), with its width
-    /// and height. Empty until the core has drawn one.
-    pub fn frame(&self) -> (&[u8], u32, u32) {
-        (
-            &self.host.frame,
-            self.host.frame_size.0,
-            self.host.frame_size.1,
-        )
+    /// The last frame in native mode as the core sent it, packed rows in
+    /// the given format, with its width and height. Empty until the core has
+    /// drawn one.
+    pub fn frame_raw(&self) -> (&[u8], u32, u32, PixelFormat) {
+        let (w, h) = self.host.frame_size;
+        (&self.host.frame, w, h, self.host.frame_format)
+    }
+
+    /// The last frame in native mode converted to XRGB8888 (B, G, R, X).
+    pub fn frame(&self) -> (Vec<u8>, u32, u32) {
+        let (raw, w, h, format) = self.frame_raw();
+        (to_xrgb8888(format, raw, w, h), w, h)
     }
 
     /// Whether the core opens content itself from its path, as disc-based
@@ -533,6 +566,7 @@ impl LibretroCore {
             native: false,
             frame: Vec::new(),
             frame_size: (0, 0),
+            frame_format: PixelFormat::Xrgb8888,
             format: PixelFormat::Xrgb8888,
             audio: Vec::new(),
             inputs: [0; 2],
@@ -755,6 +789,7 @@ mod tests {
             native: false,
             frame: Vec::new(),
             frame_size: (0, 0),
+            frame_format: PixelFormat::Xrgb8888,
             format: PixelFormat::Xrgb8888,
             audio: Vec::new(),
             inputs: [0; 2],
@@ -812,12 +847,41 @@ mod tests {
         let bytes: Vec<u8> = px.iter().flat_map(|p| p.to_le_bytes()).collect();
         let _a = Active::bind(&mut host);
         unsafe { video_refresh(bytes.as_ptr() as *const c_void, 4, 1, 8) };
-        let frame = unsafe { with_host(|h| h.frame.clone()) }.unwrap();
+        let (raw, format) = unsafe { with_host(|h| (h.frame.clone(), h.frame_format)) }.unwrap();
+        assert_eq!(raw, bytes, "a native frame is kept as the core sent it");
+        let frame = to_xrgb8888(format, &raw, 4, 1);
         assert_eq!(
             frame,
             vec![255, 255, 255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 0],
             "B, G, R, X per pixel"
         );
+    }
+
+    #[test]
+    fn a_16_bit_native_frame_keeps_two_bytes_a_pixel_and_drops_the_padding() {
+        let mut host = host_with(HashMap::new(), false);
+        host.native = true;
+        host.format = PixelFormat::Rgb565;
+        let _a = Active::bind(&mut host);
+        let (w, h) = (320usize, 240usize);
+        // Rows sent wider than the picture, as cores often do.
+        let pitch = 1024usize;
+        let mut sent = vec![0xEEu8; pitch * h];
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 3 + y) as u16).to_le_bytes();
+                sent[y * pitch + x * 2..y * pitch + x * 2 + 2].copy_from_slice(&v);
+            }
+        }
+        unsafe { video_refresh(sent.as_ptr() as *const c_void, w as u32, h as u32, pitch) };
+        let (raw, size, format) =
+            unsafe { with_host(|h| (h.frame.clone(), h.frame_size, h.frame_format)) }.unwrap();
+        assert_eq!(size, (w as u32, h as u32));
+        assert_eq!(format, PixelFormat::Rgb565);
+        assert_eq!(raw.len(), w * h * 2, "rows were not packed");
+        for (y, row) in raw.chunks_exact(w * 2).enumerate() {
+            assert_eq!(row, &sent[y * pitch..y * pitch + w * 2], "row {y}");
+        }
     }
 
     fn declaration(key: &str, value: &str) -> (Variable, CString, CString) {

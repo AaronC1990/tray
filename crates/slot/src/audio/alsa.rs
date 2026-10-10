@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use libloading::Library;
 
+use super::metronome::Metronome;
 use super::ring::Ring;
 use super::silence::Silence;
 use super::sink::{AudioError, AudioSink};
@@ -213,6 +214,11 @@ impl Playback {
         let mut buf = vec![0i16; PERIOD_FRAMES * CHANNELS as usize];
         let span = Duration::from_secs_f64(PERIOD_FRAMES as f64 / self.rate as f64);
         let mut silence = Silence::new(RELEASE_AFTER);
+        // While the device is let go, the ring still drains in real time, so
+        // a game keeps its place in the sound when the device comes back.
+        // Sleeping a period each time drains slower than that, since every
+        // sleep runs a little long; the metronome keeps to the clock.
+        let mut metronome = Metronome::new(span);
         while !stop.load(Ordering::Relaxed) {
             ring.fill(&mut buf);
             let hold = silence.hear(&buf, span);
@@ -232,11 +238,17 @@ impl Playback {
             }
             match self.pcm {
                 Some(pcm) => {
+                    metronome.reset();
                     if !self.write(pcm, &buf) {
                         return;
                     }
                 }
-                None => std::thread::sleep(span),
+                None => {
+                    let wait = metronome.wait(std::time::Instant::now());
+                    if !wait.is_zero() {
+                        std::thread::sleep(wait);
+                    }
+                }
             }
         }
     }
