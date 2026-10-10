@@ -4,3 +4,4 @@ pub mod disc;
 pub mod library;
 pub mod play;
 pub mod shelf;
+pub mod swap;

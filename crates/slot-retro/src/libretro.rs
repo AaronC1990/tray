@@ -109,6 +109,8 @@ struct Host {
     /// it, as the libretro spec asks, rather than leaving it unanswered.
     answer_defaults: bool,
     defaults: std::collections::HashMap<String, CString>,
+    /// How to change discs, from a core that has more than one.
+    disk: Option<DiskControl>,
 }
 
 thread_local! {
@@ -291,6 +293,39 @@ unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
                 h.netpacket = Some(std::ptr::read(data as *const NetpacketCallback));
             })
             .is_some()
+        }
+        GET_DISK_CONTROL_INTERFACE_VERSION => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut c_uint) = 1;
+            true
+        }
+        SET_DISK_CONTROL_EXT_INTERFACE => {
+            if data.is_null() {
+                return false;
+            }
+            let dc = std::ptr::read(data as *const DiskControl);
+            with_host(|h| h.disk = Some(dc)).is_some()
+        }
+        SET_DISK_CONTROL_INTERFACE => {
+            if data.is_null() {
+                return false;
+            }
+            let b = std::ptr::read(data as *const DiskControlBase);
+            let dc = DiskControl {
+                set_eject_state: b.set_eject_state,
+                get_eject_state: b.get_eject_state,
+                get_image_index: b.get_image_index,
+                set_image_index: b.set_image_index,
+                get_num_images: b.get_num_images,
+                replace_image_index: b.replace_image_index,
+                add_image_index: b.add_image_index,
+                set_initial_image: None,
+                get_image_path: None,
+                get_image_label: None,
+            };
+            with_host(|h| h.disk = Some(dc)).is_some()
         }
         _ => false,
     }
@@ -519,6 +554,55 @@ impl LibretroCore {
         (to_xrgb8888(format, raw, w, h), w, h)
     }
 
+    /// How many discs the loaded game has; 1 for a core without discs.
+    pub fn disc_count(&self) -> u32 {
+        match self.host.disk.and_then(|d| d.get_num_images) {
+            Some(f) => unsafe { f() }.max(1),
+            None => 1,
+        }
+    }
+
+    /// Which disc is in, counting from 0.
+    pub fn disc_index(&self) -> u32 {
+        match self.host.disk.and_then(|d| d.get_image_index) {
+            Some(f) => unsafe { f() },
+            None => 0,
+        }
+    }
+
+    /// Opens or closes the lid. False if the core cannot.
+    pub fn set_lid_open(&mut self, open: bool) -> bool {
+        let Some(f) = self.host.disk.and_then(|d| d.set_eject_state) else {
+            return false;
+        };
+        let _a = Active::bind(&mut self.host);
+        unsafe { f(open) }
+    }
+
+    /// Puts disc `index` in, counting from 0. Done with the lid open, as on
+    /// the console. False if the core refused it.
+    pub fn set_disc(&mut self, index: u32) -> bool {
+        let Some(f) = self.host.disk.and_then(|d| d.set_image_index) else {
+            return false;
+        };
+        let _a = Active::bind(&mut self.host);
+        unsafe { f(index) }
+    }
+
+    /// Asks the core to start from disc `index`, whose path as the core will
+    /// read it from the playlist is `path`. Call before `load`. False if the
+    /// core cannot start on a later disc.
+    pub fn set_first_disc(&mut self, index: u32, path: &Path) -> bool {
+        let Some(f) = self.host.disk.and_then(|d| d.set_initial_image) else {
+            return false;
+        };
+        let Ok(c) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+            return false;
+        };
+        let _a = Active::bind(&mut self.host);
+        unsafe { f(index, c.as_ptr()) }
+    }
+
     /// Whether the core opens content itself from its path, as disc-based
     /// cores do, rather than taking it whole from memory.
     pub fn needs_full_path(&self) -> bool {
@@ -605,6 +689,7 @@ impl LibretroCore {
             declared: std::collections::HashMap::new(),
             answer_defaults: false,
             defaults: std::collections::HashMap::new(),
+            disk: None,
         });
         unsafe {
             let _a = Active::bind(&mut host);
@@ -830,6 +915,7 @@ mod tests {
             declared: HashMap::new(),
             answer_defaults: false,
             defaults: HashMap::new(),
+            disk: None,
         })
     }
 

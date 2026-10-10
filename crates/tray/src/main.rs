@@ -13,8 +13,9 @@ use slot_input::{Btn, InputSource, RawEvent};
 use slot_power::{trace_first_frame, DevicePlatform};
 use tray::carousel::{Carousel, Pick};
 use tray::library::{scan, Game};
-use tray::play::{DiscGame, SAVES};
+use tray::play::{Ask, DiscGame, SAVES};
 use tray::shelf::ShelfView;
+use tray::swap::{Swap, SwapView};
 
 const CARD: &str = "/mnt/sdcard";
 const GAMES: &str = "Games/PS";
@@ -28,7 +29,8 @@ enum Mode {
     /// slot's shelves and games.
     Carts,
     Discs,
-    Playing(Box<DiscGame>),
+    /// A disc game, and which game on the shelf it is.
+    Playing(Box<DiscGame>, usize),
 }
 
 struct Slide {
@@ -109,7 +111,10 @@ fn main() {
         Ok(o) => o,
         Err(e) => fail(format!("tray: overlay: {e}")),
     };
-    let mut view = ShelfView::new(&mut overlay, panel, &root.join(LABELS));
+    let labels = root.join(LABELS);
+    let mut view = ShelfView::new(&mut overlay, panel, &labels);
+    let mut swap_view = SwapView::new(&mut overlay, panel);
+    let mut swap: Option<Swap> = None;
     let initials = games
         .iter()
         .map(|g| slot_store::initial(&g.title))
@@ -145,7 +150,7 @@ fn main() {
     loop {
         let over = slot_over(frontend.app());
         let carts = matches!(mode, Mode::Carts) || over;
-        if !matches!(mode, Mode::Playing(_)) {
+        if !matches!(mode, Mode::Playing(..)) {
             pacer.wait();
         }
         let began = Instant::now();
@@ -158,7 +163,7 @@ fn main() {
         frontend.advance_events(to_slot);
         if frontend.restarting() || frontend.powering_off() {
             // Finishing a game writes its memory card.
-            if let Mode::Playing(game) = std::mem::replace(&mut mode, Mode::Discs) {
+            if let Mode::Playing(game, _) = std::mem::replace(&mut mode, Mode::Discs) {
                 game.finish(frontend.audio_sink());
             }
             if frontend.restarting() {
@@ -182,13 +187,8 @@ fn main() {
                     match carousel.handle(ev, ms) {
                         Some(Pick::Play(i)) => {
                             write_last(&root, Some(&games[i]));
-                            match DiscGame::start(
-                                &root,
-                                &games[i].path,
-                                frontend.audio_sink(),
-                                period,
-                            ) {
-                                Ok(game) => next = Some(Mode::Playing(Box::new(game))),
+                            match DiscGame::start(&root, &games[i], frontend.audio_sink(), period) {
+                                Ok(game) => next = Some(Mode::Playing(Box::new(game), i)),
                                 Err(e) => eprintln!("tray: {}: {e}", games[i].path.display()),
                             }
                             break;
@@ -203,10 +203,33 @@ fn main() {
                 carousel.tick(frontend.now(), dt);
                 view.tick(dt, (!games.is_empty()).then(|| carousel.selected()));
             }
-            Mode::Playing(game) => {
-                let quit = mine.into_iter().any(|ev| game.handle(ev));
-                if quit {
-                    next = Some(Mode::Discs);
+            Mode::Playing(game, which) => {
+                // A disc change takes the buttons until it is done.
+                let ask = match swap {
+                    Some(_) => None,
+                    None => mine.into_iter().find_map(|ev| game.handle(ev)),
+                };
+                match ask {
+                    Some(Ask::Quit) => next = Some(Mode::Discs),
+                    Some(Ask::Disc(by)) => {
+                        let (from, count) = (game.disc(), game.disc_count());
+                        let to = from as i64 + by as i64;
+                        if count > 1 && (0..count as i64).contains(&to) {
+                            game.release_all();
+                            swap = Some(Swap::start(
+                                &mut swap_view,
+                                &mut overlay,
+                                &labels,
+                                &games[*which],
+                                from,
+                                to as u32,
+                                count,
+                            ));
+                        }
+                    }
+                    None => {}
+                }
+                if next.is_some() {
                 } else if over {
                     // The game waits, silent, while slot's screen is up,
                     // with its card written in case the power goes next.
@@ -214,11 +237,15 @@ fn main() {
                     game.save_card();
                 } else {
                     game.frame(&mut picture, frontend.app().output_volume());
+                    if swap.as_mut().is_some_and(|s| s.tick(dt, game)) {
+                        swap = None;
+                    }
                 }
             }
         }
         if let Some(to) = next {
-            if let Mode::Playing(game) = std::mem::replace(&mut mode, to) {
+            if let Mode::Playing(game, _) = std::mem::replace(&mut mode, to) {
+                swap = None;
                 period = game.finish(frontend.audio_sink()).or(period);
                 carousel.release_all();
             }
@@ -239,7 +266,7 @@ fn main() {
                 _ if slot_over(frontend.app()) => frontend.render(compositor, panel),
                 Mode::Carts => frontend.render(compositor, panel),
                 Mode::Discs => view.draw(overlay, &games, carousel),
-                Mode::Playing(_) => picture.draw(panel),
+                Mode::Playing(..) => picture.draw(panel),
             }
         };
         draw(
@@ -251,6 +278,11 @@ fn main() {
             &picture,
             &carousel,
         );
+        if let (Mode::Playing(..), Some(s)) = (&mode, &swap) {
+            if !slot_over(frontend.app()) {
+                s.draw(&swap_view, &overlay);
+            }
+        }
         if let Some(by) = switch {
             // Keep the screen being left, cross to the other system, and
             // slide the old screen away over it.
@@ -308,7 +340,7 @@ fn main() {
         }
         let swap_took = swap.elapsed();
         pacer.swapped(work, swap_took > Duration::from_millis(1));
-        if let Mode::Playing(game) = &mut mode {
+        if let Mode::Playing(game, _) = &mut mode {
             if !over {
                 game.swapped(swap_took);
             }

@@ -17,6 +17,9 @@ pub const GET_LOG_INTERFACE: c_uint = 27;
 pub const GET_SAVE_DIRECTORY: c_uint = 31;
 pub const SET_AUDIO_BUFFER_STATUS_CALLBACK: c_uint = 62;
 pub const SET_NETPACKET_INTERFACE: c_uint = 78;
+pub const SET_DISK_CONTROL_INTERFACE: c_uint = 13;
+pub const GET_DISK_CONTROL_INTERFACE_VERSION: c_uint = 57;
+pub const SET_DISK_CONTROL_EXT_INTERFACE: c_uint = 58;
 
 pub const RUMBLE_STRONG: c_uint = 0;
 pub const RUMBLE_WEAK: c_uint = 1;
@@ -33,6 +36,37 @@ pub const NETPACKET_RELIABLE: i32 = 1 << 0;
 pub const NETPACKET_UNSEQUENCED: i32 = 1 << 1;
 pub const NETPACKET_FLUSH_HINT: i32 = 1 << 2;
 pub const NETPACKET_BROADCAST: u16 = 0xFFFF;
+
+/// The calls a multi-disc core offers for opening its lid and changing
+/// discs. The first seven are the original interface; the last three come
+/// with the extended one and are None from a core that offers only that.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DiskControl {
+    pub set_eject_state: Option<unsafe extern "C" fn(bool) -> bool>,
+    pub get_eject_state: Option<unsafe extern "C" fn() -> bool>,
+    pub get_image_index: Option<unsafe extern "C" fn() -> c_uint>,
+    pub set_image_index: Option<unsafe extern "C" fn(c_uint) -> bool>,
+    pub get_num_images: Option<unsafe extern "C" fn() -> c_uint>,
+    pub replace_image_index: Option<unsafe extern "C" fn()>,
+    pub add_image_index: Option<unsafe extern "C" fn()>,
+    pub set_initial_image: Option<unsafe extern "C" fn(c_uint, *const c_char) -> bool>,
+    pub get_image_path: Option<unsafe extern "C" fn(c_uint, *mut c_char, usize) -> bool>,
+    pub get_image_label: Option<unsafe extern "C" fn(c_uint, *mut c_char, usize) -> bool>,
+}
+
+/// The original interface's part of `DiskControl`, as a core passes it.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DiskControlBase {
+    pub set_eject_state: Option<unsafe extern "C" fn(bool) -> bool>,
+    pub get_eject_state: Option<unsafe extern "C" fn() -> bool>,
+    pub get_image_index: Option<unsafe extern "C" fn() -> c_uint>,
+    pub set_image_index: Option<unsafe extern "C" fn(c_uint) -> bool>,
+    pub get_num_images: Option<unsafe extern "C" fn() -> c_uint>,
+    pub replace_image_index: Option<unsafe extern "C" fn()>,
+    pub add_image_index: Option<unsafe extern "C" fn()>,
+}
 
 #[repr(C)]
 pub struct GameInfo {

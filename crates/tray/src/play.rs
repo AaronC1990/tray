@@ -10,6 +10,8 @@ use slot_gfx::{FrameLayout, PicturePass};
 use slot_input::{Btn, RawEvent};
 use slot_retro::{to_xrgb8888, ButtonMask, LibretroCore, PixelFormat, RetroCore};
 
+use crate::library::{content, Game};
+
 pub const CORE: &str = "System/pcsx_rearmed_libretro.so";
 pub const SAVES: &str = "Saves/PS";
 
@@ -64,13 +66,35 @@ pub struct DiscGame {
     /// core hands card 1 to the frontend to keep, as libretro cores do.
     card: PathBuf,
     card_written: Option<Vec<u8>>,
+    /// Where the disc in play is remembered.
+    disc_file: PathBuf,
 }
 
-/// The file a game's memory card is kept in: named after the file the game
-/// started from, so every disc of a playlist shares one card.
-pub fn card_path(root: &Path, disc: &Path) -> PathBuf {
-    let stem = disc.file_stem().unwrap_or_default().to_string_lossy();
+/// The file a game's memory card is kept in, named after the game rather
+/// than any one disc, so all its discs share one card.
+pub fn card_path(root: &Path, stem: &str) -> PathBuf {
     root.join(SAVES).join(format!("{stem}.srm"))
+}
+
+/// The file that remembers which disc a game was on.
+pub fn disc_path(root: &Path, stem: &str) -> PathBuf {
+    root.join(SAVES).join(format!("{stem}.disc"))
+}
+
+/// The disc `stem` was last on, counting from 0.
+pub fn last_disc(root: &Path, stem: &str) -> u32 {
+    std::fs::read_to_string(disc_path(root, stem))
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// What a button event asks of the game, beyond playing it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Quit,
+    /// Change to the next disc (1) or the one before (-1).
+    Disc(i32),
 }
 
 /// Writes `bytes` to `path` whole or not at all: a card half written when
@@ -91,10 +115,12 @@ impl DiscGame {
     /// is the panel's refresh if an earlier game measured it.
     pub fn start(
         root: &Path,
-        disc: &Path,
+        game: &Game,
         sink: &mut dyn AudioSink,
         period: Option<Duration>,
     ) -> Result<Self, String> {
+        let disc = content(root, game).map_err(|e| format!("playlist: {e}"))?;
+        let disc = disc.as_path();
         eprintln!("tray: play {}", disc.display());
         let saves = root.join(SAVES);
         let _ = std::fs::create_dir_all(&saves);
@@ -104,8 +130,23 @@ impl DiscGame {
         // PCSX ReARMed turns on declared defaults such as threaded rendering
         // only when they are answered; unanswered, it renders on this thread.
         core.set_answer_defaults(true);
+        // Start on the disc the game was left on.
+        let first = last_disc(root, &game.stem);
+        if first > 0 {
+            match game.discs.get(first as usize) {
+                Some(path) if core.set_first_disc(first, path) => {
+                    eprintln!("tray: starting on disc {}", first + 1)
+                }
+                _ => eprintln!("tray: could not start on disc {}", first + 1),
+            }
+        }
         core.load(disc).map_err(|e| format!("load: {e}"))?;
-        let card = card_path(root, disc);
+        eprintln!(
+            "tray: disc {} of {}",
+            core.disc_index() + 1,
+            core.disc_count()
+        );
+        let card = card_path(root, &game.stem);
         let card_written = match std::fs::read(&card) {
             Ok(bytes) => match core.load_save_ram(&bytes) {
                 Ok(()) => {
@@ -129,7 +170,7 @@ impl DiscGame {
             0 => av.sample_rate,
             hz => hz as f64,
         };
-        let first = period.unwrap_or(FIRST_PERIOD);
+        let first_period = period.unwrap_or(FIRST_PERIOD);
         let drained = ring.drained_samples();
         let mut game = DiscGame {
             core,
@@ -140,7 +181,7 @@ impl DiscGame {
             out: Vec::new(),
             pad: 0,
             menu: false,
-            period: first,
+            period: first_period,
             swaps: period.is_none().then(|| Vec::with_capacity(64)),
             last_swap: Instant::now(),
             frames: 0,
@@ -152,6 +193,7 @@ impl DiscGame {
             ring,
             card,
             card_written,
+            disc_file: disc_path(root, &game.stem),
         };
         game.resampler = Resampler::new(game.core_hz(), device_hz);
         Ok(game)
@@ -169,15 +211,45 @@ impl DiscGame {
     }
 
     /// Takes one button event. True when it asks to quit.
-    pub fn handle(&mut self, ev: RawEvent) -> bool {
+    pub fn handle(&mut self, ev: RawEvent) -> Option<Ask> {
         match ev {
             RawEvent::Down(Btn::Menu) => self.menu = true,
             RawEvent::Up(Btn::Menu) => self.menu = false,
-            RawEvent::Down(Btn::Start) if self.menu => return true,
+            RawEvent::Down(Btn::Start) if self.menu => return Some(Ask::Quit),
+            RawEvent::Down(Btn::R1) if self.menu => return Some(Ask::Disc(1)),
+            RawEvent::Down(Btn::L1) if self.menu => return Some(Ask::Disc(-1)),
             RawEvent::Down(b) => self.pad |= bit(b),
             RawEvent::Up(b) => self.pad &= !bit(b),
         }
-        false
+        None
+    }
+
+    pub fn disc_count(&self) -> u32 {
+        self.core.disc_count()
+    }
+
+    /// The disc in, counting from 0.
+    pub fn disc(&self) -> u32 {
+        self.core.disc_index()
+    }
+
+    pub fn set_lid_open(&mut self, open: bool) {
+        if !self.core.set_lid_open(open) {
+            eprintln!(
+                "tray: the lid would not {}",
+                if open { "open" } else { "close" }
+            );
+        }
+    }
+
+    /// Changes to disc `index` and remembers it for next time.
+    pub fn set_disc(&mut self, index: u32) {
+        if !self.core.set_disc(index) {
+            eprintln!("tray: disc {} refused", index + 1);
+            return;
+        }
+        eprintln!("tray: disc {} in", index + 1);
+        let _ = std::fs::write(&self.disc_file, format!("{index}\n"));
     }
 
     /// Lets go of every button, as when the game loses them for a while.
