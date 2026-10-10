@@ -26,6 +26,15 @@ const FIRST_PERIOD: Duration = Duration::from_micros(16_760);
 /// How often the memory card is checked for changes and written out.
 const CARD_CHECK_FRAMES: u64 = 60;
 
+/// Rewind keeps a state every this many frames; a PlayStation state is
+/// over 4 MB, too much to take every frame. Played back, one state every
+/// this many swaps, so rewinding runs at twice normal speed.
+const REWIND_EVERY: u32 = 4;
+const REWIND_POP_EVERY: u32 = 2;
+/// The memory rewind may keep, compressed. States differ little from one
+/// to the next, so this holds tens of seconds.
+const REWIND_BYTES: usize = 48 * 1024 * 1024;
+
 pub struct DiscGame {
     /// Shared with the snapshot slot saves and loads states through.
     core: Rc<RefCell<LibretroCore>>,
@@ -55,6 +64,14 @@ pub struct DiscGame {
     fast_frames: u64,
     /// What one frame takes to run, in seconds, smoothed.
     frame_cost: f32,
+    /// States kept to rewind through, compressed on their own thread.
+    rewind: slot::rewind::RewindThread,
+    /// Whether to keep states for rewind, as slot's Rewind setting says.
+    recording: bool,
+    /// Frames since a state was last kept, and swaps since one was last
+    /// played back.
+    since_kept: u32,
+    since_played: u32,
 }
 
 /// The file a game's memory card is kept in, named after the game rather
@@ -111,10 +128,13 @@ pub enum Ask {
     Disc(i32),
     /// Turn fast forward on, or off again.
     FastForward,
+    /// Rewind while MENU and L2 are held, and stop when L2 is let go.
+    RewindStart,
+    RewindStop,
 }
 
-/// MENU with START to quit, with L or R to change discs, and with R2 to
-/// fast-forward. The buttons
+/// MENU with START to quit, with L or R to change discs, with R2 to
+/// fast-forward and held with L2 to rewind. The buttons
 /// pressed with MENU are kept from slot and the game.
 #[derive(Default)]
 pub struct Combos {
@@ -139,9 +159,11 @@ impl Combos {
             RawEvent::Down(b @ Btn::R1) if self.menu => Some((b, Ask::Disc(1))),
             RawEvent::Down(b @ Btn::L1) if self.menu => Some((b, Ask::Disc(-1))),
             RawEvent::Down(b @ Btn::R2) if self.menu => Some((b, Ask::FastForward)),
+            RawEvent::Down(b @ Btn::L2) if self.menu => Some((b, Ask::RewindStart)),
             RawEvent::Up(b) if self.held.contains(&b) => {
                 self.held.retain(|h| *h != b);
-                return (None, false);
+                let ask = (b == Btn::L2).then_some(Ask::RewindStop);
+                return (ask, false);
             }
             _ => None,
         };
@@ -333,6 +355,10 @@ impl DiscGame {
             disc_file: disc_path(root, &game.stem),
             fast_frames: 0,
             frame_cost: 0.0,
+            rewind: slot::rewind::RewindThread::spawn(REWIND_BYTES),
+            recording: false,
+            since_kept: 0,
+            since_played: 0,
         };
         game.resampler = Resampler::new(game.core_hz(), device_hz);
         Ok(game)
@@ -357,6 +383,49 @@ impl DiscGame {
         // Uploading the picture and swapping, beside running frames.
         let overhead = self.work.1.as_secs_f32() + 0.002;
         plan_frames(speed, self.frame_cost, overhead, self.period.as_secs_f32())
+    }
+
+    /// Whether to keep states to rewind through.
+    pub fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+    }
+
+    /// One swap of rewinding: every few swaps, the state kept before the
+    /// last one played back, quietly, and its picture uploaded. False when
+    /// there is nothing further back to go to.
+    pub fn rewind_step(&mut self, picture: &mut PicturePass) -> bool {
+        if !self.ring.muted() {
+            self.ring.set_muted(true);
+        }
+        self.since_kept = 0;
+        self.since_played += 1;
+        if self.since_played < REWIND_POP_EVERY {
+            return true;
+        }
+        self.since_played = 0;
+        let Some(state) = self.rewind.pop() else {
+            return false;
+        };
+        let mut core = self.core.borrow_mut();
+        if let Err(e) = core.unserialize(&state) {
+            eprintln!("tray: rewind: {e}");
+            return false;
+        }
+        // A frame from the state, for its picture; its sound is dropped.
+        core.run_frame(ButtonMask(0));
+        let _ = core.take_audio();
+        let (px, w, h, format) = core.frame_raw();
+        match format {
+            PixelFormat::Rgb565 => picture.upload_as(FrameLayout::Rgb565, px, w, h),
+            PixelFormat::Xrgb8888 => picture.upload(px, w, h),
+            PixelFormat::Xrgb1555 => picture.upload(&to_xrgb8888(format, px, w, h), w, h),
+        }
+        true
+    }
+
+    /// How full the rewind history is, out of 100, for slot's rewind bar.
+    pub fn rewind_fill(&self) -> u8 {
+        self.rewind.fill()
     }
 
     /// Frames run beyond one a swap under fast forward, so far.
@@ -427,6 +496,15 @@ impl DiscGame {
             }
             if ran >= steps {
                 break;
+            }
+        }
+        if self.recording {
+            self.since_kept += ran;
+            if self.since_kept >= REWIND_EVERY {
+                self.since_kept = 0;
+                if let Ok(state) = core.serialize() {
+                    self.rewind.push(state);
+                }
             }
         }
         let emulated = Instant::now();

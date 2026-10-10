@@ -22,11 +22,13 @@ pub enum Toast {
     ShaderGrid,
     ShaderDot,
     ShaderSimpletex,
+    ShaderScanlines,
+    ShaderCrt,
     Palette(GbPalette),
 }
 
 impl Toast {
-    const FIXED: [Toast; 14] = [
+    const FIXED: [Toast; 16] = [
         Toast::StateSaved,
         Toast::StateLoaded,
         Toast::NeedsGpsp,
@@ -41,6 +43,8 @@ impl Toast {
         Toast::ShaderGrid,
         Toast::ShaderDot,
         Toast::ShaderSimpletex,
+        Toast::ShaderScanlines,
+        Toast::ShaderCrt,
     ];
 
     pub fn all() -> Vec<Toast> {
@@ -73,6 +77,8 @@ impl Toast {
             Toast::ShaderGrid => "Shader: Grid",
             Toast::ShaderDot => "Shader: Dot",
             Toast::ShaderSimpletex => "Shader: Simpletex",
+            Toast::ShaderScanlines => "Shader: Scanlines",
+            Toast::ShaderCrt => "Shader: CRT",
             Toast::Palette(p) => p.label(),
         }
     }

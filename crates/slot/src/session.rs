@@ -32,6 +32,8 @@ pub struct Session {
     plain_triggers: bool,
     /// Another frontend's game is fast-forwarding, latched on.
     outside_ff: bool,
+    /// Another frontend's game is rewinding, with this much left to go.
+    outside_rewind: Option<u8>,
 }
 
 impl Session {
@@ -55,6 +57,7 @@ impl Session {
             driven: false,
             plain_triggers: false,
             outside_ff: false,
+            outside_rewind: None,
         }
     }
 
@@ -97,6 +100,15 @@ impl Session {
     /// Shows slot's fast-forward badge for another frontend's game.
     pub fn set_outside_ff(&mut self, on: bool) {
         self.outside_ff = on;
+    }
+
+    /// Shows slot's rewind bar for another frontend's game, filled as given,
+    /// or takes it away with None.
+    pub fn set_outside_rewind(&mut self, fill: Option<u8>) {
+        if self.outside_rewind.is_some() && fill.is_none() {
+            self.app.hide_rewind();
+        }
+        self.outside_rewind = fill;
     }
 
     /// The buttons the game is being given, after slot has taken its own.
@@ -333,6 +345,9 @@ impl Session {
     }
 
     fn sync_rewind_hud(&mut self) {
+        if let Some(fill) = self.outside_rewind {
+            return self.app.show_rewind(fill);
+        }
         let fill = self
             .actually_rewinding()
             .then(|| self.emu.as_ref().map(EmuHandle::rewind_fill))

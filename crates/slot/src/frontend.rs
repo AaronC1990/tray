@@ -369,6 +369,11 @@ impl Frontend {
         self.session.set_outside_ff(on);
     }
 
+    /// Shows slot's rewind bar for another frontend's game.
+    pub fn set_outside_rewind(&mut self, fill: Option<u8>) {
+        self.session.set_outside_rewind(fill);
+    }
+
     /// The buttons the game is being given, after slot has taken its own.
     pub fn game_pad(&self) -> slot_retro::ButtonMask {
         self.session.game_pad()

@@ -290,6 +290,9 @@ pub struct App {
     outside_ring: Option<StateRing>,
     /// Whether the outside game has been asked to come out.
     outside_eject: bool,
+    /// A step through the screen shaders asked for over the outside game,
+    /// which keeps its own: true for the next, false for the one before.
+    outside_shader: Option<bool>,
     /// Which way the shelf ring was left for the outside shelf, until taken.
     leaving: Option<i32>,
     shelves: Vec<(Platform, Shelf)>,
@@ -414,6 +417,7 @@ impl App {
             outside_text: None,
             outside_ring: None,
             outside_eject: false,
+            outside_shader: None,
             leaving: None,
             shelves,
             shelf_at,
@@ -662,6 +666,22 @@ impl App {
         self.flush_eject(&cart);
         self.pending = None;
         self.outside_eject = true;
+    }
+
+    /// A shader step asked for over the outside game, since last asked:
+    /// true for the next, false for the one before.
+    pub fn take_outside_shader(&mut self) -> Option<bool> {
+        self.outside_shader.take()
+    }
+
+    /// Shows one of slot's toasts, as for a shader chosen.
+    pub fn say(&mut self, toast: Toast) {
+        self.hud.toast(toast, self.now());
+    }
+
+    /// Whether slot's Rewind setting is on.
+    pub fn rewind_on(&self) -> bool {
+        self.state.rewind
     }
 
     /// Whether a game taken out keeps its place to resume from.
@@ -1612,6 +1632,9 @@ impl App {
                 | Action::ColourCorrectionToggle
         );
         if picture && self.outside_seated() {
+            if let Action::ShaderNext | Action::ShaderPrev = action {
+                self.outside_shader = Some(action == Action::ShaderNext);
+            }
             return true;
         }
         if let Action::ShaderNext | Action::ShaderPrev = action {

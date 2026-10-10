@@ -145,3 +145,107 @@ fn a_16_bit_frame_lands_at_2x_with_its_colours_widened() {
         }
     }
 }
+
+fn shoot_look(look: slot_gfx::PictureLook, w: u32, h: u32) -> Option<Vec<u8>> {
+    let _g = GL.lock().unwrap_or_else(PoisonError::into_inner);
+    let surface = HeadlessSurface::new().ok()?;
+    let mut pass = PicturePass::new(&surface).ok()?;
+    pass.upload(&frame(w, h, |_, _| [160, 160, 160]), w, h);
+    pass.set_look(look);
+    pass.draw((640, 480));
+    let mut out = vec![0u8; 640 * 480 * 4];
+    unsafe {
+        gl::ReadPixels(
+            0,
+            0,
+            640,
+            480,
+            gl::RGBA,
+            gl::UNSIGNED_BYTE,
+            out.as_mut_ptr() as *mut _,
+        );
+    }
+    let rows: Vec<&[u8]> = out.chunks_exact(640 * 4).rev().collect();
+    Some(rows.concat())
+}
+
+#[test]
+fn scanlines_darken_every_other_panel_row_of_a_240_line_frame() {
+    use slot_gfx::PictureLook;
+    let Some(img) = shoot_look(PictureLook::Scanlines, 320, 240) else {
+        return;
+    };
+    for y in (100..140).step_by(2) {
+        let (lit, gap) = (at(&img, 300, y)[1], at(&img, 300, y + 1)[1]);
+        assert!(
+            lit > 160 && gap < 90,
+            "rows {y}/{}: {lit} then {gap}",
+            y + 1
+        );
+    }
+}
+
+#[test]
+fn scanlines_hold_back_on_a_480_line_frame() {
+    use slot_gfx::PictureLook;
+    let Some(img) = shoot_look(PictureLook::Scanlines, 512, 480) else {
+        return;
+    };
+    let rows: Vec<u8> = (100..110).map(|y| at(&img, 300, y)[1]).collect();
+    assert!(
+        rows.windows(2).all(|w| w[0] == w[1]),
+        "lines in a 480-line frame: {rows:?}"
+    );
+}
+
+#[test]
+fn the_grid_draws_one_panel_pixel_lines_between_frame_pixels() {
+    use slot_gfx::PictureLook;
+    let Some(img) = shoot_look(PictureLook::Grid, 320, 240) else {
+        return;
+    };
+    // At 2x, the first panel column and row of each frame pixel are dark.
+    assert!(at(&img, 300, 101)[1] < at(&img, 301, 101)[1]);
+    assert!(at(&img, 301, 100)[1] < at(&img, 301, 101)[1]);
+}
+
+#[test]
+fn the_crt_look_lights_red_green_and_blue_columns_in_turn() {
+    use slot_gfx::PictureLook;
+    let Some(img) = shoot_look(PictureLook::Crt, 320, 240) else {
+        return;
+    };
+    let y = 100;
+    let lit: Vec<[u8; 3]> = (300..303).map(|x| at(&img, x, y)).collect();
+    let strongest: Vec<usize> = lit
+        .iter()
+        .map(|c| (0..3).max_by_key(|&i| c[i]).unwrap())
+        .collect();
+    let mut sorted = strongest.clone();
+    sorted.sort();
+    assert_eq!(sorted, [0, 1, 2], "columns {lit:?}");
+}
+
+#[test]
+fn looks_step_round_both_ways_and_keep_their_names() {
+    use slot_gfx::PictureLook;
+    assert_eq!(PictureLook::Sharp.step(false), PictureLook::Dot);
+    assert_eq!(PictureLook::Dot.step(true), PictureLook::Sharp);
+    for look in PictureLook::ALL {
+        assert_eq!(PictureLook::from_name(look.name()), Some(look));
+    }
+}
+
+#[test]
+fn dots_dim_toward_each_frame_pixels_far_corner() {
+    use slot_gfx::PictureLook;
+    let Some(img) = shoot_look(PictureLook::Dot, 320, 240) else {
+        return;
+    };
+    let (tl, tr, br) = (
+        at(&img, 300, 100)[1],
+        at(&img, 301, 100)[1],
+        at(&img, 301, 101)[1],
+    );
+    assert!(tl > tr && tr > br, "a dot's pixels: {tl} {tr} {br}");
+}

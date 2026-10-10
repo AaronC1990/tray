@@ -31,6 +31,12 @@ void main() {
 /// its neighbour only across the one panel pixel it shares with it, so
 /// pixels stay the same size at any scale. At a whole scale every panel
 /// pixel samples a texel's centre, which is plain nearest sampling.
+///
+/// On top of that, a look: 0 none, 1 scanlines, 2 a light CRT, 3 an LCD
+/// grid, 4 LCD dots. Each works in panel pixels against where the frame's
+/// pixels land, so a line or a gap is one panel pixel wide however the
+/// frame is scaled, and each holds back where the frame is too big for
+/// it to have room, as a 480-line picture is for scanlines.
 const PICTURE_FRAG: &str = r#"
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -40,16 +46,105 @@ precision mediump float;
 uniform sampler2D u_tex;
 uniform vec2 u_src;
 uniform vec2 u_scale;
+uniform float u_mode;
 varying vec2 v_uv;
-void main() {
-    vec2 t = v_uv * u_src;
+
+vec3 sharp(vec2 t) {
     vec2 cell = floor(t);
     vec2 cd = t - cell - 0.5;
     vec2 range = max(vec2(0.5) - 0.5 / u_scale, vec2(0.0));
     vec2 f = (cd - clamp(cd, -range, range)) * u_scale + 0.5;
-    FRAG_COLOR = vec4(texture2D(u_tex, (cell + f) / u_src).rgb, 1.0);
+    return texture2D(u_tex, (cell + f) / u_src).rgb;
+}
+
+/// Whether this panel pixel is the last one down a frame pixel's height.
+float last_row(vec2 t) {
+    return step(1.0 - 1.0 / u_scale.y, fract(t.y));
+}
+
+void main() {
+    vec2 t = v_uv * u_src;
+    vec3 c = sharp(t);
+    // Room for a look: each frame pixel at least about two panel pixels.
+    vec2 roomy = step(vec2(1.75), u_scale);
+    if (u_mode > 0.5 && u_mode < 1.5) {
+        float dark = last_row(t) * roomy.y;
+        c = c * mix(1.08, 0.45, dark);
+    } else if (u_mode > 1.5 && u_mode < 2.5) {
+        // A soft beam across, a dimmer gap between lines, and a faint
+        // shadow mask of red, green and blue panel columns.
+        vec2 px = vec2(0.5, 0.0) / u_src;
+        vec3 soft = 0.25 * (texture2D(u_tex, v_uv - px).rgb
+            + texture2D(u_tex, v_uv + px).rgb) + 0.5 * c;
+        float dark = last_row(t) * roomy.y;
+        c = soft * mix(1.18, 0.6, dark);
+        float col = mod(floor(gl_FragCoord.x), 3.0);
+        vec3 mask = vec3(0.88);
+        if (col < 0.5) { mask.r = 1.06; }
+        else if (col < 1.5) { mask.g = 1.06; }
+        else { mask.b = 1.06; }
+        c *= mask;
+    } else if (u_mode > 2.5 && u_mode < 3.5) {
+        vec2 edge = step(fract(t), 1.0 / u_scale) * roomy;
+        c *= 1.0 - 0.38 * max(edge.x, edge.y);
+    } else if (u_mode > 3.5) {
+        // Each frame pixel a dot: lit at its top left, dimmer along its
+        // last panel column and row, dimmest in the corner they share.
+        vec2 far = step(1.0 - 1.0 / u_scale, fract(t)) * roomy;
+        c *= 1.06 - 0.24 * (far.x + far.y);
+    }
+    FRAG_COLOR = vec4(min(c, vec3(1.0)), 1.0);
 }
 "#;
+
+/// A look over a frame, chosen by its frontend.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum PictureLook {
+    #[default]
+    Sharp,
+    Scanlines,
+    Crt,
+    Grid,
+    Dot,
+}
+
+impl PictureLook {
+    pub const ALL: [PictureLook; 5] = [
+        PictureLook::Sharp,
+        PictureLook::Scanlines,
+        PictureLook::Crt,
+        PictureLook::Grid,
+        PictureLook::Dot,
+    ];
+
+    fn mode(self) -> f32 {
+        self as u8 as f32
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PictureLook::Sharp => "sharp",
+            PictureLook::Scanlines => "scanlines",
+            PictureLook::Crt => "crt",
+            PictureLook::Grid => "grid",
+            PictureLook::Dot => "dot",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<PictureLook> {
+        PictureLook::ALL.into_iter().find(|l| l.name() == name)
+    }
+
+    /// The next look along, or the one before, round and round.
+    pub fn step(self, next: bool) -> PictureLook {
+        let n = PictureLook::ALL.len();
+        let at = PictureLook::ALL
+            .iter()
+            .position(|l| *l == self)
+            .unwrap_or(0);
+        PictureLook::ALL[if next { (at + 1) % n } else { (at + n - 1) % n }]
+    }
+}
 
 /// Draws one frame of any size across the panel's 4:3 area, for cores
 /// whose picture is not slot's fixed 240x160.
@@ -86,6 +181,8 @@ pub struct PicturePass {
     layout: FrameLayout,
     u_src: gl::types::GLint,
     u_scale: gl::types::GLint,
+    u_mode: gl::types::GLint,
+    look: PictureLook,
     quad: Quad,
 }
 
@@ -94,12 +191,13 @@ impl PicturePass {
         crate::gl::load(surface);
         let prog = crate::shaders::program(PICTURE_VERT, PICTURE_FRAG)?;
         let tex = crate::gl::texture(1, 1, gl::LINEAR, gl::CLAMP_TO_EDGE, gl::BGRA, None);
-        let (u_src, u_scale);
+        let (u_src, u_scale, u_mode);
         unsafe {
             gl::UseProgram(prog);
             gl::Uniform1i(crate::gl::uniform_location(prog, "u_tex"), 0);
             u_src = crate::gl::uniform_location(prog, "u_src");
             u_scale = crate::gl::uniform_location(prog, "u_scale");
+            u_mode = crate::gl::uniform_location(prog, "u_mode");
         }
         Ok(PicturePass {
             prog,
@@ -108,6 +206,8 @@ impl PicturePass {
             layout: FrameLayout::Xrgb8888,
             u_src,
             u_scale,
+            u_mode,
+            look: PictureLook::Sharp,
             quad: Quad::new(),
         })
     }
@@ -163,6 +263,14 @@ impl PicturePass {
         self.layout = layout;
     }
 
+    pub fn set_look(&mut self, look: PictureLook) {
+        self.look = look;
+    }
+
+    pub fn look(&self) -> PictureLook {
+        self.look
+    }
+
     pub fn size(&self) -> (u32, u32) {
         self.size
     }
@@ -182,6 +290,7 @@ impl PicturePass {
             gl::BindTexture(gl::TEXTURE_2D, self.tex);
             gl::Uniform2f(self.u_src, fw, fh);
             gl::Uniform2f(self.u_scale, w as f32 / fw, h as f32 / fh);
+            gl::Uniform1f(self.u_mode, self.look.mode());
         }
         self.quad.draw();
     }

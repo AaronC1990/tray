@@ -8,11 +8,12 @@ use slot::app::{set_outside_shelf, App, Outside, Phase};
 use slot::frontend::Frontend;
 use slot::input::DeviceInput;
 use slot::pacer::{Pacer, MIN_FRAME, STEP_TIMEOUT};
-use slot_gfx::{Compositor, Draw, FbdevSurface, Overlay, PicturePass, Surface};
+use slot_gfx::{Compositor, Draw, FbdevSurface, Overlay, PictureLook, PicturePass, Surface};
 use slot_input::{Btn, InputSource, RawEvent};
 use slot_power::{trace_first_frame, DevicePlatform};
 use slot_retro::ButtonMask;
 use slot_store::initial;
+use slot_ui::Toast;
 use tray::carousel::{Carousel, Pick};
 use tray::library::{scan, Game};
 use tray::motion::{Eject, Insert, Swap};
@@ -24,6 +25,8 @@ const GAMES: &str = "Games/PS";
 const LABELS: &str = "Labels/PS";
 /// Which system was last on screen, so tray starts where it was left.
 const LAST: &str = ".tray-last";
+/// The look chosen for PlayStation games, kept apart from slot's shaders.
+const LOOK: &str = ".tray-look";
 /// What slot's slot says when the disc shelf comes up.
 const NAME: &str = "PlayStation";
 
@@ -66,6 +69,8 @@ struct Play {
     combos: Combos,
     /// Fast forward, latched on by MENU + R2.
     fast: bool,
+    /// Rewinding, while MENU + L2 are held.
+    rewinding: bool,
 }
 
 /// A plain black veil over the whole panel.
@@ -110,6 +115,30 @@ fn game_paused(app: &App) -> bool {
 fn game_hidden(app: &App) -> bool {
     !matches!(app.phase(), Phase::Playing { .. } | Phase::Polaroids { .. })
         || app.power_menu().is_some()
+}
+
+/// The look PlayStation games were last shown with.
+fn read_look(root: &Path) -> PictureLook {
+    std::fs::read_to_string(root.join(SAVES).join(LOOK))
+        .ok()
+        .and_then(|t| PictureLook::from_name(t.trim()))
+        .unwrap_or_default()
+}
+
+fn write_look(root: &Path, look: PictureLook) {
+    let _ = std::fs::create_dir_all(root.join(SAVES));
+    let _ = std::fs::write(root.join(SAVES).join(LOOK), format!("{}\n", look.name()));
+}
+
+/// slot's toast naming a look, as it names its own shaders.
+fn look_toast(look: PictureLook) -> Toast {
+    match look {
+        PictureLook::Sharp => Toast::ShaderOff,
+        PictureLook::Scanlines => Toast::ShaderScanlines,
+        PictureLook::Crt => Toast::ShaderCrt,
+        PictureLook::Grid => Toast::ShaderGrid,
+        PictureLook::Dot => Toast::ShaderDot,
+    }
 }
 
 fn last_path(root: &Path) -> PathBuf {
@@ -171,6 +200,7 @@ fn main() {
         Ok(o) => o,
         Err(e) => fail(format!("tray: overlay: {e}")),
     };
+    picture.set_look(read_look(&root));
     let labels = root.join(LABELS);
     let mut view = ShelfView::new(&mut compositor, &labels);
     let initials = games.iter().map(|g| initial(&g.title)).collect();
@@ -358,6 +388,7 @@ fn main() {
                             outro: None,
                             combos: Combos::default(),
                             fast: false,
+                            rewinding: false,
                         })));
                     }
                 }
@@ -370,6 +401,7 @@ fn main() {
                     intro,
                     outro,
                     fast,
+                    rewinding,
                     ..
                 } = play.as_mut();
                 // A disc change or quitting takes the combinations until done.
@@ -381,6 +413,13 @@ fn main() {
                         Ask::FastForward => {
                             *fast = !*fast;
                             frontend.set_outside_ff(*fast);
+                        }
+                        // Only with slot's Rewind setting on, as for carts.
+                        Ask::RewindStart if frontend.app().rewind_on() => *rewinding = true,
+                        Ask::RewindStart => frontend.app_mut().refuse(),
+                        Ask::RewindStop => {
+                            *rewinding = false;
+                            frontend.set_outside_rewind(None);
                         }
                         Ask::Disc(by) => {
                             let (from, count) = (game.disc(), game.disc_count());
@@ -400,6 +439,14 @@ fn main() {
                         }
                     }
                 }
+                // SELECT + A and B step through the looks, as through slot's
+                // shaders on a cart, and slot names the one chosen.
+                if let Some(next) = frontend.app_mut().take_outside_shader() {
+                    let look = picture.look().step(next);
+                    picture.set_look(look);
+                    write_look(&root, look);
+                    frontend.app_mut().say(look_toast(look));
+                }
                 // Holding MENU ejects, as for a cart, as does MENU + START.
                 if frontend.app_mut().take_outside_eject() && outro.is_none() {
                     *outro = Some(0.0);
@@ -415,8 +462,13 @@ fn main() {
                             anim: Eject::start(),
                         });
                     }
+                } else if *rewinding && swap.is_none() {
+                    *intro += dt;
+                    game.rewind_step(&mut picture);
+                    frontend.set_outside_rewind(Some(game.rewind_fill()));
                 } else {
                     *intro += dt;
+                    game.set_recording(frontend.app().rewind_on() && swap.is_none());
                     let pad = match swap {
                         Some(_) => ButtonMask(0),
                         None => frontend.game_pad(),
@@ -452,6 +504,7 @@ fn main() {
                     // slot lets go of the game before it is unloaded.
                     frontend.app_mut().unseat_outside();
                     frontend.set_outside_ff(false);
+                    frontend.set_outside_rewind(None);
                     frontend.set_plain_triggers(false);
                     frontend.take_input_back();
                     period = play.game.finish(frontend.audio_sink()).or(period);
