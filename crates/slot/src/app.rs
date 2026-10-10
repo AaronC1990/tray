@@ -277,6 +277,13 @@ fn outside_shelf() -> bool {
 pub struct Outside {
     pub row: Vec<Draw>,
     pub seated: Vec<Draw>,
+    /// The other frontend's own slot, behind what goes into it and in
+    /// front of it; slot's own when both are empty.
+    pub back: Vec<Draw>,
+    pub front: Vec<Draw>,
+    /// Where the slot's name is printed, from the top, when the other
+    /// frontend's slot has its own place for it.
+    pub name_y: Option<f32>,
 }
 
 pub struct App {
@@ -2287,10 +2294,30 @@ impl App {
         };
         draw_backdrop(self.wallpaper, out);
         out.extend_from_slice(&outside.row);
-        slot_ui::draw_slot_back(1.0, out);
+        let own = outside.back.is_empty() && outside.front.is_empty();
+        match own {
+            true => slot_ui::draw_slot_back(1.0, out),
+            false => out.extend_from_slice(&outside.back),
+        }
         out.extend_from_slice(&outside.seated);
-        slot_ui::draw_slot_front(1.0, out);
-        draw_slot_name(self.shelf_platform, self.slot_name_alpha(), out);
+        match own {
+            true => slot_ui::draw_slot_front(1.0, out),
+            false => out.extend_from_slice(&outside.front),
+        }
+        let name = self.shelf_platform;
+        let alpha = self.slot_name_alpha();
+        match (outside.name_y, name.face) {
+            (Some(y), Some(tex)) if alpha > 0.0 => out.push(Draw::Tex {
+                x: (OUT_W as f32 - name.w as f32) / 2.0,
+                y,
+                w: name.w as f32,
+                h: slot_ui::HINT_H as f32,
+                tex,
+                alpha,
+            }),
+            (Some(_), _) => {}
+            (None, _) => draw_slot_name(name, alpha, out),
+        }
         draw_footer(
             self.battery,
             self.battery_percent,

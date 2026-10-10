@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use slot::app::{EJECT_S, SEATED_AT};
-use slot_gfx::{Compositor, Draw, TexId, OUT_H, OUT_W};
+use slot_gfx::{Compositor, Draw, TexId, OUT_W};
 
 use crate::carousel::Carousel;
 use crate::disc::{disc_face, label_art, shadow_face, shine_face};
@@ -29,10 +29,10 @@ const TURN_SECS: f32 = 9.0;
 /// row slides, with a few to spare when it turns back.
 const POOL: usize = 9;
 
-/// Slot's slot: the lip a cart catches on, and where a seated cart's top
-/// sits, just inside it.
-const LIP_Y: f32 = OUT_H as f32 - slot_ui::MOUTH_H;
-const SEATED_Y: f32 = LIP_Y + slot_ui::LIP_H + 4.0;
+/// The drive's slit, which a disc catches on as a cart does on slot's
+/// lip, and where a seated disc's top sits, just inside it.
+const LIP_Y: f32 = crate::drive::SLIT_Y;
+const SEATED_Y: f32 = LIP_Y + 4.0;
 /// The catch, as slot's cart takes it: in to the lip, a short creep, then
 /// the rest of the way.
 const CATCH_IN: f32 = 0.42;
@@ -76,6 +76,8 @@ pub struct Look {
     /// One of the view's spare faces to show as the picked disc instead of
     /// its shelf face.
     pub face: Option<usize>,
+    /// How lit the drive's light is, as while a disc is read.
+    pub light: f32,
 }
 
 /// The shelf as draws: what stands on it, and what is passing through the
@@ -83,6 +85,9 @@ pub struct Look {
 pub struct ShelfDraws {
     pub row: Vec<Draw>,
     pub seated: Vec<Draw>,
+    /// The drive, behind and in front of what goes into it.
+    pub back: Vec<Draw>,
+    pub front: Vec<Draw>,
 }
 
 struct Faces {
@@ -105,6 +110,7 @@ pub struct ShelfView {
     /// Faces for discs that are not the shelf's own, such as the next disc
     /// of a game going in.
     spare: [TexId; 2],
+    drive: crate::drive::Drive,
 }
 
 impl ShelfView {
@@ -123,6 +129,7 @@ impl ShelfView {
                 compositor.create_texture(BIG, BIG, &blank),
                 compositor.create_texture(BIG, BIG, &blank),
             ],
+            drive: crate::drive::Drive::new(compositor),
         }
     }
 
@@ -210,8 +217,14 @@ impl ShelfView {
     ) -> ShelfDraws {
         let mut row = Vec::new();
         let mut seated = Vec::new();
+        let (back, front) = (self.drive.back(), self.drive.front(look.light));
         if games.is_empty() {
-            return ShelfDraws { row, seated };
+            return ShelfDraws {
+                row,
+                seated,
+                back,
+                front,
+            };
         }
         let cx = OUT_W as f32 / 2.0;
         let foot = slot_ui::rest_y(BIG as f32) + BIG as f32;
@@ -276,6 +289,11 @@ impl ShelfView {
                 });
             }
         }
-        ShelfDraws { row, seated }
+        ShelfDraws {
+            row,
+            seated,
+            back,
+            front,
+        }
     }
 }

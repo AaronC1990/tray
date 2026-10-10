@@ -105,6 +105,7 @@ impl Insert {
         Look {
             seat,
             recede: seat,
+            light: if self.t >= IN_S { 1.0 } else { 0.0 },
             ..Look::default()
         }
     }
@@ -150,6 +151,7 @@ impl Eject {
         Look {
             seat,
             recede: seat,
+            light: if self.t < Self::SHOWN { 1.0 } else { 0.0 },
             ..Look::default()
         }
     }
@@ -270,6 +272,7 @@ impl Swap {
             recede: 1.0,
             dx,
             face: Some(face),
+            light: if seat >= 1.0 { 1.0 } else { 0.0 },
         }
     }
 

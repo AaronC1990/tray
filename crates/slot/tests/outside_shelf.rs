@@ -95,7 +95,7 @@ fn the_outside_shelf_is_drawn_in_slots_frame_and_named_in_the_slot() {
     assert_eq!(a.take_leave(), Some(-1));
     a.set_outside(Some(Outside {
         row: vec![marker],
-        seated: Vec::new(),
+        ..Outside::default()
     }));
     a.say_in_slot("PlayStation");
     assert_eq!(a.slot_text().as_deref(), Some("PlayStation"));

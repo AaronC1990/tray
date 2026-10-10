@@ -50,9 +50,9 @@ fn main() {
             colour: [0.12, 0.13, 0.16, 1.0],
         }];
         items.extend(d.row);
-        slot_ui::draw_slot_back(1.0, &mut items);
+        items.extend(d.back);
         items.extend(d.seated);
-        slot_ui::draw_slot_front(1.0, &mut items);
+        items.extend(d.front);
         items.push(Draw::Rect {
             x: 0.0,
             y: 0.0,

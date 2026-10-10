@@ -557,6 +557,9 @@ fn main() {
             Outside {
                 row: d.row,
                 seated: d.seated,
+                back: d.back,
+                front: d.front,
+                name_y: Some(tray::drive::NAME_Y),
             }
         });
         let shelf_up = outside.is_some();
