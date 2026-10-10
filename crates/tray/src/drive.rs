@@ -94,8 +94,13 @@ pub fn drive_face() -> Vec<u8> {
     out
 }
 
-/// The drive's two halves on the GPU: above the slit, which a disc passes
-/// in front of, and from the slit down, which hides it.
+/// The drive on the GPU: the whole band, which a disc passes in front of,
+/// and the band from the slit down, drawn again over the disc to hide it.
+///
+/// The two are not halves that meet edge to edge: each face is shrunk to
+/// the panel once and drawn at its shrunk size in whole pixels, so two
+/// halves land a fraction of a pixel apart and leave a line between them.
+/// Drawing the lower part over the whole band leaves no gap to show.
 pub struct Drive {
     back: TexId,
     front: TexId,
@@ -106,7 +111,7 @@ impl Drive {
         let face = drive_face();
         let row = OUT_W as usize * 4;
         let split = SLIT_TOP as usize * row;
-        let back = compositor.create_texture(OUT_W, SLIT_TOP, &face[..split]);
+        let back = compositor.create_texture(OUT_W, BAND_H, &face);
         let front = compositor.create_texture(OUT_W, BAND_H - SLIT_TOP, &face[split..]);
         Drive { back, front }
     }
@@ -116,7 +121,7 @@ impl Drive {
             x: 0.0,
             y: BAND_Y,
             w: OUT_W as f32,
-            h: SLIT_TOP as f32,
+            h: BAND_H as f32,
             tex: self.back,
             alpha: 1.0,
         }]
