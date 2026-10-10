@@ -128,3 +128,26 @@ fn a_game_boy_game_is_whole_at_actual_size_and_fills_when_stretched() {
     s.feed([RawEvent::Up(Btn::R1)], 220);
     assert_eq!(s.app().game_fit(), GameFit::Whole, "R did not give it back");
 }
+
+#[test]
+fn the_game_boy_bezel_frames_actual_size_but_not_stretched_or_gba() {
+    let d = common::tmp_root_with_gb_carts(&["Tetris", "Zzz"]);
+    let mut s = session_playing(d.path());
+    assert!(
+        s.app().frames_game_boy_sides(),
+        "actual size has bare sides"
+    );
+    s.feed([RawEvent::Down(Btn::L1)], 100);
+    s.feed([RawEvent::Up(Btn::L1)], 120);
+    assert!(
+        !s.app().frames_game_boy_sides(),
+        "a stretched picture fills the width"
+    );
+
+    let d = tmp_root_with_carts(&["Emerald", "Zzz"]);
+    let s = session_playing(d.path());
+    assert!(
+        !s.app().frames_game_boy_sides(),
+        "a GBA picture fills the width"
+    );
+}

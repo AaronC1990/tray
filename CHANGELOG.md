@@ -6,6 +6,7 @@
 - Integer Scale settings on the Screen page, one for GBA and one for GB / GBC, on screens where they change anything. GB / GBC is on by default and draws Game Boy games at a sharp 3x, trimming one row at the top and bottom to fit. GBA Integer Scale draws at a sharp 2x with a border instead of filling the screen.
 - Game Boy games stretched with L1 get the same even pixels on every screen, the RG SP included.
 - Menus, carts and text are sharp on the RG35XXSP. They were drawn at the RG SP's size and shrunk by the GPU every frame; each is now shrunk once to the screen's size and drawn on whole pixels.
+- A Game Boy bezel for the RG35XXSP frames the bare sides beside a Game Boy picture at actual size, with the same soft edge as the strip below and a power LED on the left, like a Game Boy Color. It lives in `System/bezels/gb/`; stretched and GBA pictures keep the usual bezel.
 - The GPU tests now run on Linux as well as macOS, through Mesa's offscreen GLES.
 
 ## [1.5.0](https://github.com/BrandonKowalski/slot/releases/tag/v1.5.0)

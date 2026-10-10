@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 pub const BEZELS: &str = "System/bezels";
 
+/// Bezels for a Game Boy picture at actual size, which leaves the panel's
+/// sides bare. They frame those sides as well as the strip below.
+pub const GB_BEZELS: &str = "System/bezels/gb";
+
 fn dims(path: &Path) -> Option<(u32, u32)> {
     if !path.extension()?.eq_ignore_ascii_case("png") {
         return None;
@@ -12,7 +16,15 @@ fn dims(path: &Path) -> Option<(u32, u32)> {
 }
 
 pub fn pick(root: &Path, panel: (u32, u32)) -> Option<PathBuf> {
-    let mut fits: Vec<((u32, u32), PathBuf)> = std::fs::read_dir(root.join(BEZELS))
+    pick_in(root, BEZELS, panel)
+}
+
+pub fn pick_gb(root: &Path, panel: (u32, u32)) -> Option<PathBuf> {
+    pick_in(root, GB_BEZELS, panel)
+}
+
+fn pick_in(root: &Path, dir: &str, panel: (u32, u32)) -> Option<PathBuf> {
+    let mut fits: Vec<((u32, u32), PathBuf)> = std::fs::read_dir(root.join(dir))
         .ok()?
         .flatten()
         .map(|e| e.path())

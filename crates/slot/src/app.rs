@@ -847,6 +847,13 @@ impl App {
         }
     }
 
+    /// Whether a Game Boy picture leaves the panel's sides bare, so the
+    /// Game Boy bezel framing them belongs on screen. A stretched picture
+    /// fills the width and keeps the usual bezel.
+    pub fn frames_game_boy_sides(&self) -> bool {
+        self.platform != Platform::Gba && self.video_mode == VideoMode::Actual
+    }
+
     pub fn source_rect(&self) -> [f32; 4] {
         video_mode::source_rect(self.platform, self.video_mode)
     }

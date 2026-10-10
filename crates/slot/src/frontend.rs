@@ -330,6 +330,17 @@ impl Frontend {
             compositor.set_bezel(panel.0, panel.1, &rgba);
             eprintln!("slot: bezel {}", path.display());
         }
+        let gb = self
+            .session
+            .app()
+            .root()
+            .and_then(|root| crate::bezel::pick_gb(root, panel));
+        if let Some(path) = gb {
+            if let Some(rgba) = bezel_face(&path, panel.0, panel.1) {
+                compositor.set_gb_bezel(panel.0, panel.1, &rgba);
+                eprintln!("slot: game boy bezel {}", path.display());
+            }
+        }
     }
 
     pub fn render(&mut self, compositor: &mut Compositor, window: (u32, u32)) {
@@ -354,6 +365,7 @@ impl Frontend {
         compositor.set_frame_split(self.session.app().frame_split());
         compositor.set_game_source_rect(self.session.app().source_rect());
         compositor.set_game_fit(self.session.app().game_fit());
+        compositor.use_gb_bezel(self.session.app().frames_game_boy_sides());
         compositor.begin_frame();
         if self.draw_rebuild(compositor) {
             return;

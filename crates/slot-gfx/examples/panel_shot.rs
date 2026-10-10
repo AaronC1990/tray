@@ -14,20 +14,29 @@ fn main() {
     let mut buf = vec![0; r.output_buffer_size()];
     r.next_frame(&mut buf).unwrap();
     c.set_bezel(640, 480, &buf);
+    let scene = std::env::var("GB_SCENE")
+        .ok()
+        .map(|p| std::fs::read(p).unwrap());
     let mut shot = Vec::new();
     for y in 0..SRC_H as usize {
         for x in 0..SRC_W as usize {
             let inside = (40..200).contains(&x) && (8..152).contains(&y);
-            let v: u8 = if inside {
-                if ((x - 40) / 8 + (y - 8) / 8) % 2 == 0 {
-                    220
-                } else {
-                    150
+            let px = match (&scene, inside) {
+                (Some(rgb), true) => {
+                    let o = ((y - 8) * 160 + (x - 40)) * 3;
+                    [rgb[o + 2], rgb[o + 1], rgb[o], 0]
                 }
-            } else {
-                200
+                (Some(_), false) => [0, 0, 0, 0],
+                (None, _) => {
+                    let v: u8 = match (inside, ((x / 8) + (y / 8)) % 2 == 0) {
+                        (false, _) => 200,
+                        (true, true) => 220,
+                        (true, false) => 150,
+                    };
+                    [v / 2, v, v / 2, 0]
+                }
             };
-            shot.extend_from_slice(&[v / 2, v, v / 2, 0]);
+            shot.extend_from_slice(&px);
         }
     }
     let gb = [40.0 / 240.0, 8.0 / 160.0, 200.0 / 240.0, 152.0 / 160.0];
@@ -39,7 +48,10 @@ fn main() {
         GameFit::Fill
     });
     c.fit(panel);
-    c.set_screen_effect(ScreenEffect::Grid);
+    c.set_screen_effect(match std::env::var("EFFECT").as_deref() {
+        Ok("off") => ScreenEffect::None,
+        _ => ScreenEffect::Grid,
+    });
     c.set_screen_power(1.0);
     c.begin_frame();
     c.upload_game(&shot);

@@ -33,3 +33,36 @@ fn files_that_are_not_sized_pngs_are_ignored() {
     assert_eq!(picked(&d, (640, 480)), None);
     assert_eq!(picked(&tempfile::tempdir().unwrap(), (640, 480)), None);
 }
+
+#[test]
+fn a_game_boy_bezel_comes_from_its_own_folder_and_never_the_shared_one() {
+    use slot::bezel::{pick_gb, GB_BEZELS};
+    let d = card(&["640x480.png"]);
+    assert_eq!(pick_gb(d.path(), (640, 480)), None, "no Game Boy bezel");
+    std::fs::create_dir_all(d.path().join(GB_BEZELS)).unwrap();
+    std::fs::write(d.path().join(GB_BEZELS).join("640x480.png"), b"").unwrap();
+    let gb = pick_gb(d.path(), (640, 480)).expect("the Game Boy bezel");
+    assert!(gb.ends_with("System/bezels/gb/640x480.png"), "{gb:?}");
+    assert_eq!(picked(&d, (640, 480)).as_deref(), Some("640x480.png"));
+}
+
+#[test]
+fn the_shipped_game_boy_bezel_leaves_exactly_the_3x_picture_open() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../card/System/bezels/gb/640x480.png");
+    let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()));
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    assert_eq!((info.width, info.height), (640, 480));
+    let alpha = |x: u32, y: u32| buf[((y * 640 + x) * 4 + 3) as usize];
+    for y in [10, 200, 400] {
+        assert_eq!(alpha(79, y), 255, "the left panel is open at row {y}");
+        assert_eq!(alpha(560, y), 255, "the right panel is open at row {y}");
+        assert_eq!(alpha(320, y), 0, "the picture is covered at row {y}");
+        assert!(
+            alpha(80, y) < 255 && alpha(559, y) < 255,
+            "the picture's edge is covered"
+        );
+    }
+}

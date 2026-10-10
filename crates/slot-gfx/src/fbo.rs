@@ -26,6 +26,8 @@ pub struct Compositor {
     u_bezel_gain: gl::types::GLint,
     u_bezel_alpha: gl::types::GLint,
     bezel: Option<gl::types::GLuint>,
+    gb_bezel: Option<gl::types::GLuint>,
+    use_gb_bezel: bool,
 }
 
 impl Compositor {
@@ -90,6 +92,8 @@ impl Compositor {
                 u_bezel_gain,
                 u_bezel_alpha,
                 bezel: None,
+                gb_bezel: None,
+                use_gb_bezel: false,
             })
         }
     }
@@ -244,20 +248,21 @@ impl Compositor {
         }
     }
 
-    pub fn set_bezel(&mut self, w: u32, h: u32, rgba: &[u8]) {
-        let stride = w as usize * 4;
-        let mut bottom_up = Vec::with_capacity(rgba.len());
-        for row in rgba.chunks_exact(stride).rev() {
-            bottom_up.extend_from_slice(row);
+    /// The bezel drawn while a Game Boy picture sits at actual size, framing
+    /// its sides. Without one the usual bezel is drawn.
+    pub fn set_gb_bezel(&mut self, w: u32, h: u32, rgba: &[u8]) {
+        let tex = bezel_texture(w, h, rgba);
+        if let Some(old) = self.gb_bezel.replace(tex) {
+            unsafe { gl::DeleteTextures(1, &old) };
         }
-        let tex = crate::gl::texture(
-            w,
-            h,
-            gl::LINEAR,
-            gl::CLAMP_TO_EDGE,
-            gl::RGBA,
-            Some(&bottom_up),
-        );
+    }
+
+    pub fn use_gb_bezel(&mut self, on: bool) {
+        self.use_gb_bezel = on;
+    }
+
+    pub fn set_bezel(&mut self, w: u32, h: u32, rgba: &[u8]) {
+        let tex = bezel_texture(w, h, rgba);
         if let Some(old) = self.bezel.replace(tex) {
             unsafe { gl::DeleteTextures(1, &old) };
         }
@@ -307,7 +312,11 @@ impl Compositor {
             }
             None => self.blit_part(x, y, w, h, [0.0, 0.0, 1.0, 1.0]),
         }
-        let Some(bezel) = self.bezel.filter(|_| framed && self.screen > 0.0) else {
+        let chosen = match self.use_gb_bezel {
+            true => self.gb_bezel.or(self.bezel),
+            false => self.bezel,
+        };
+        let Some(bezel) = chosen.filter(|_| framed && self.screen > 0.0) else {
             return;
         };
         let alpha = self.screen.clamp(0.0, 1.0);
@@ -345,6 +354,22 @@ pub fn canvas_size(window: (u32, u32)) -> (u32, u32) {
     }
 }
 
+fn bezel_texture(w: u32, h: u32, rgba: &[u8]) -> gl::types::GLuint {
+    let stride = w as usize * 4;
+    let mut bottom_up = Vec::with_capacity(rgba.len());
+    for row in rgba.chunks_exact(stride).rev() {
+        bottom_up.extend_from_slice(row);
+    }
+    crate::gl::texture(
+        w,
+        h,
+        gl::LINEAR,
+        gl::CLAMP_TO_EDGE,
+        gl::RGBA,
+        Some(&bottom_up),
+    )
+}
+
 impl Drop for Compositor {
     fn drop(&mut self) {
         unsafe {
@@ -352,7 +377,7 @@ impl Drop for Compositor {
             gl::DeleteTextures(1, &self.tex);
             gl::DeleteProgram(self.blit);
             gl::DeleteProgram(self.bezel_prog);
-            if let Some(tex) = self.bezel {
+            for tex in [self.bezel, self.gb_bezel].into_iter().flatten() {
                 gl::DeleteTextures(1, &tex);
             }
         }

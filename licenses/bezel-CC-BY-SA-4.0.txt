@@ -10,3 +10,12 @@ https://creativecommons.org/licenses/by-sa/4.0/
 
 Changes: scaled from 1024x768 to 640x480, and the logo recoloured to a flat silver.
 This adapted image is shared under the same license.
+
+System/bezels/gb/640x480.png
+
+Adapted from the System/bezels/640x480.png above. Changes: the sides
+beside a Game Boy picture at 3x (x 0-79 and 560-639) filled in black, and
+the same edge shadow drawn along the picture's left and right edges,
+and a power LED with a POWER label (set in Open Sans) on the left side.
+Rebuild it with tools/gb_bezel.py.
+This adapted image is shared under the same license.
