@@ -1,5 +1,5 @@
 //! A PlayStation game in play, stepped one frame a swap by tray's loop.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,9 @@ pub const SAVES: &str = "Saves/PS";
 /// The panel's refresh until it is measured; slot found the RG SP's near
 /// this, and the first second of swaps corrects it for this panel.
 const FIRST_PERIOD: Duration = Duration::from_micros(16_760);
+
+/// How often the memory card is checked for changes and written out.
+const CARD_CHECK_FRAMES: u64 = 60;
 
 fn bit(btn: Btn) -> u16 {
     match btn {
@@ -57,6 +60,30 @@ pub struct DiscGame {
     work: (Duration, Duration),
     pushed: u64,
     window: (Instant, u64, u64),
+    /// Where memory card 1 lives, and what was last written there. The
+    /// core hands card 1 to the frontend to keep, as libretro cores do.
+    card: PathBuf,
+    card_written: Option<Vec<u8>>,
+}
+
+/// The file a game's memory card is kept in: named after the file the game
+/// started from, so every disc of a playlist shares one card.
+pub fn card_path(root: &Path, disc: &Path) -> PathBuf {
+    let stem = disc.file_stem().unwrap_or_default().to_string_lossy();
+    root.join(SAVES).join(format!("{stem}.srm"))
+}
+
+/// Writes `bytes` to `path` whole or not at all: a card half written when
+/// the power goes is worse than the card before it.
+fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("srm.tmp");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 impl DiscGame {
@@ -78,6 +105,20 @@ impl DiscGame {
         // only when they are answered; unanswered, it renders on this thread.
         core.set_answer_defaults(true);
         core.load(disc).map_err(|e| format!("load: {e}"))?;
+        let card = card_path(root, disc);
+        let card_written = match std::fs::read(&card) {
+            Ok(bytes) => match core.load_save_ram(&bytes) {
+                Ok(()) => {
+                    eprintln!("tray: memory card {}", card.display());
+                    Some(bytes)
+                }
+                Err(e) => {
+                    eprintln!("tray: memory card {}: {e}", card.display());
+                    None
+                }
+            },
+            Err(_) => None,
+        };
         let av = core.av_info();
         eprintln!("tray: {:.3} fps, {} Hz", av.fps, av.sample_rate);
         if let Err(e) = sink.open(av.sample_rate as u32) {
@@ -109,6 +150,8 @@ impl DiscGame {
             pushed: 0,
             window: (Instant::now(), 0, drained),
             ring,
+            card,
+            card_written,
         };
         game.resampler = Resampler::new(game.core_hz(), device_hz);
         Ok(game)
@@ -196,8 +239,28 @@ impl DiscGame {
                 );
             }
         }
+        if self.frames.is_multiple_of(CARD_CHECK_FRAMES) {
+            self.save_card();
+        }
         if self.frames.is_multiple_of(600) {
             self.report();
+        }
+    }
+
+    /// Writes memory card 1 out if the game changed it since last time.
+    pub fn save_card(&mut self) {
+        let Some(now) = self.core.save_ram() else {
+            return;
+        };
+        if self.card_written.as_deref() == Some(&now[..]) {
+            return;
+        }
+        match write_whole(&self.card, &now) {
+            Ok(()) => {
+                eprintln!("tray: saved memory card {}", self.card.display());
+                self.card_written = Some(now);
+            }
+            Err(e) => eprintln!("tray: memory card {}: {e}", self.card.display()),
         }
     }
 
@@ -225,9 +288,10 @@ impl DiscGame {
         self.times = Times::default();
     }
 
-    /// Ends play: unloads the core, which writes its memory cards, and
+    /// Ends play: writes the memory card, unloads the core, and
     /// gives `sink` back at slot's rate. Returns the measured refresh.
-    pub fn finish(self, sink: &mut dyn AudioSink) -> Option<Duration> {
+    pub fn finish(mut self, sink: &mut dyn AudioSink) -> Option<Duration> {
+        self.save_card();
         eprintln!(
             "tray: quit after {} frames, {} slow",
             self.frames, self.slow

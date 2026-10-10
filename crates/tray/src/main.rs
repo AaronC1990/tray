@@ -157,7 +157,7 @@ fn main() {
         };
         frontend.advance_events(to_slot);
         if frontend.restarting() || frontend.powering_off() {
-            // A game's memory cards are written when its core unloads.
+            // Finishing a game writes its memory card.
             if let Mode::Playing(game) = std::mem::replace(&mut mode, Mode::Discs) {
                 game.finish(frontend.audio_sink());
             }
@@ -208,8 +208,10 @@ fn main() {
                 if quit {
                     next = Some(Mode::Discs);
                 } else if over {
-                    // The game waits, silent, while slot's screen is up.
+                    // The game waits, silent, while slot's screen is up,
+                    // with its card written in case the power goes next.
                     game.release_all();
+                    game.save_card();
                 } else {
                     game.frame(&mut picture, frontend.app().output_volume());
                 }
