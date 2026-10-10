@@ -11,13 +11,14 @@ host = ["slot/host", "slot-gfx/host"]
 device = ["slot/device", "slot-gfx/device"]
 
 [[bin]]
-name = "tray-psx"
+name = "tray"
 path = "src/main.rs"
 
 [dependencies]
 slot = { path = "../slot", default-features = false }
 slot-gfx = { path = "../slot-gfx", default-features = false }
 slot-input = { path = "../slot-input" }
+slot-power = { path = "../slot-power" }
 slot-retro = { path = "../slot-retro" }
 slot-store = { path = "../slot-store" }
 slot-ui = { path = "../slot-ui" }

@@ -256,8 +256,24 @@ pub enum Phase {
     },
 }
 
+/// Whether another frontend shares the shelf ring with slot, as tray's
+/// disc shelf does. Set before boot; slot then hands L and R past its last
+/// shelf over to it rather than wrapping, and never treats one cart as the
+/// whole library.
+static OUTSIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_outside_shelf(on: bool) {
+    OUTSIDE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn outside_shelf() -> bool {
+    OUTSIDE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct App {
     phase: Phase,
+    /// Which way the shelf ring was left for the outside shelf, until taken.
+    leaving: Option<i32>,
     shelves: Vec<(Platform, Shelf)>,
     shelf_at: usize,
     play_held: Option<Millis>,
@@ -376,6 +392,7 @@ impl App {
         App {
             radio: radio_jobs(),
             phase: Phase::Shelf,
+            leaving: None,
             shelves,
             shelf_at,
             play_held: None,
@@ -511,9 +528,58 @@ impl App {
     }
 
     fn switch_shelf(&mut self, by: i32) {
-        let Some(to) = self.next_shelf(by) else {
+        let to = match outside_shelf() {
+            true => self.next_shelf_in_ring(by),
+            false => self.next_shelf(by),
+        };
+        let Some(to) = to else {
+            if outside_shelf() {
+                self.shelf_mut().release_hold();
+                self.play_held = None;
+                self.leaving = Some(by);
+            }
             return;
         };
+        self.show_shelf(to);
+    }
+
+    /// The next shelf with carts `by` away, without wrapping: past the
+    /// last shelf lies the outside one.
+    fn next_shelf_in_ring(&self, by: i32) -> Option<usize> {
+        let n = self.shelves.len() as i32;
+        (1..n)
+            .map(|step| self.shelf_at as i32 + by * step)
+            .take_while(|at| (0..n).contains(at))
+            .map(|at| at as usize)
+            .find(|at| !self.shelves[*at].1.carts.is_empty())
+    }
+
+    /// Takes which way the shelf ring was left, if it was since last asked.
+    pub fn take_leave(&mut self) -> Option<i32> {
+        self.leaving.take()
+    }
+
+    /// Comes back into the shelf ring from the outside shelf, moving `by`:
+    /// onto the first shelf with carts going right, the last going left.
+    pub fn enter_shelves(&mut self, by: i32) {
+        let mut order: Vec<usize> = (0..self.shelves.len()).collect();
+        if by < 0 {
+            order.reverse();
+        }
+        if let Some(to) = order
+            .into_iter()
+            .find(|at| !self.shelves[*at].1.carts.is_empty())
+        {
+            self.show_shelf(to);
+        }
+        self.leaving = None;
+    }
+
+    pub fn has_carts(&self) -> bool {
+        self.carts().next().is_some()
+    }
+
+    fn show_shelf(&mut self, to: usize) {
         self.shelf_mut().release_hold();
         self.play_held = None;
         self.shelf_at = to;
@@ -703,7 +769,9 @@ impl App {
     }
 
     pub fn shelf_platform_name(&self) -> Option<&'static str> {
-        self.next_shelf(1)?;
+        if !outside_shelf() {
+            self.next_shelf(1)?;
+        }
         Some(self.shelves[self.shelf_at].0.name())
     }
 
@@ -738,7 +806,7 @@ impl App {
     }
 
     pub fn single_cart(&self) -> bool {
-        self.carts().count() == 1
+        !outside_shelf() && self.carts().count() == 1
     }
 
     pub fn set_faces(&mut self, faces: Vec<TexId>) {

@@ -1,12 +1,13 @@
-//! Plays one disc until MENU and START are pressed together.
+//! A PlayStation game in play, stepped one frame a swap by tray's loop.
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use slot::audio::open_sink;
+use slot::audio::{volume, AudioSink, Ring, GBA_HZ};
 use slot::drc::{drc_ratio, drc_target};
 use slot::resample::Resampler;
-use slot_gfx::{FrameLayout, PicturePass, Surface};
-use slot_input::{Btn, InputSource, RawEvent};
+use slot_gfx::{FrameLayout, PicturePass};
+use slot_input::{Btn, RawEvent};
 use slot_retro::{to_xrgb8888, ButtonMask, LibretroCore, PixelFormat, RetroCore};
 
 pub const CORE: &str = "System/pcsx_rearmed_libretro.so";
@@ -36,155 +37,208 @@ fn bit(btn: Btn) -> u16 {
     }
 }
 
-/// What playing needs from the shelf that stays the same between games.
-pub struct Console<'a> {
-    pub surface: &'a mut dyn Surface,
-    pub picture: &'a mut PicturePass,
-    pub input: &'a mut dyn InputSource,
-    /// The clock input times are kept against.
-    pub started: Instant,
-    pub panel: (u32, u32),
-    /// The panel's measured refresh, once a game has measured it.
-    pub period: Option<Duration>,
+pub struct DiscGame {
+    core: LibretroCore,
+    ring: Arc<Ring>,
+    fps: f64,
+    rate: f64,
+    device_hz: f64,
+    resampler: Resampler,
+    out: Vec<i16>,
+    pad: u16,
+    menu: bool,
+    period: Duration,
+    /// Swap gaps seen while the panel's refresh is still being learned.
+    swaps: Option<Vec<Duration>>,
+    last_swap: Instant,
+    frames: u64,
+    slow: u32,
+    times: Times,
+    work: (Duration, Duration),
+    pushed: u64,
+    window: (Instant, u64, u64),
 }
 
-/// Plays `disc` until it is quit. The core is unloaded on return, which
-/// lets it write its memory cards.
-pub fn play(console: &mut Console, root: &Path, disc: &Path) -> Result<(), String> {
-    eprintln!("tray: play {}", disc.display());
-    let saves = root.join(SAVES);
-    let _ = std::fs::create_dir_all(&saves);
-    let mut core = LibretroCore::open_with(&root.join(CORE), &root.join("BIOS"), &saves)
-        .map_err(|e| format!("core: {e}"))?;
-    core.set_native_video(true);
-    // PCSX ReARMed turns on declared defaults such as threaded rendering
-    // only when they are answered; unanswered, it renders on this thread.
-    core.set_answer_defaults(true);
-    core.load(disc).map_err(|e| format!("load: {e}"))?;
-    let av = core.av_info();
-    eprintln!("tray: {:.3} fps, {} Hz", av.fps, av.sample_rate);
-
-    let mut sink = open_sink();
-    if let Err(e) = sink.open(av.sample_rate as u32) {
-        eprintln!("tray: audio: {e}, playing silent");
+impl DiscGame {
+    /// Loads `disc` and points `sink` at the core's sample rate. `period`
+    /// is the panel's refresh if an earlier game measured it.
+    pub fn start(
+        root: &Path,
+        disc: &Path,
+        sink: &mut dyn AudioSink,
+        period: Option<Duration>,
+    ) -> Result<Self, String> {
+        eprintln!("tray: play {}", disc.display());
+        let saves = root.join(SAVES);
+        let _ = std::fs::create_dir_all(&saves);
+        let mut core = LibretroCore::open_with(&root.join(CORE), &root.join("BIOS"), &saves)
+            .map_err(|e| format!("core: {e}"))?;
+        core.set_native_video(true);
+        // PCSX ReARMed turns on declared defaults such as threaded rendering
+        // only when they are answered; unanswered, it renders on this thread.
+        core.set_answer_defaults(true);
+        core.load(disc).map_err(|e| format!("load: {e}"))?;
+        let av = core.av_info();
+        eprintln!("tray: {:.3} fps, {} Hz", av.fps, av.sample_rate);
+        if let Err(e) = sink.open(av.sample_rate as u32) {
+            eprintln!("tray: audio: {e}, playing silent");
+        }
+        let ring = sink.ring();
+        let device_hz = match ring.sample_rate() {
+            0 => av.sample_rate,
+            hz => hz as f64,
+        };
+        let first = period.unwrap_or(FIRST_PERIOD);
+        let drained = ring.drained_samples();
+        let mut game = DiscGame {
+            core,
+            fps: av.fps,
+            rate: av.sample_rate,
+            device_hz,
+            resampler: Resampler::new(1.0, 1.0),
+            out: Vec::new(),
+            pad: 0,
+            menu: false,
+            period: first,
+            swaps: period.is_none().then(|| Vec::with_capacity(64)),
+            last_swap: Instant::now(),
+            frames: 0,
+            slow: 0,
+            times: Times::default(),
+            work: (Duration::ZERO, Duration::ZERO),
+            pushed: 0,
+            window: (Instant::now(), 0, drained),
+            ring,
+        };
+        game.resampler = Resampler::new(game.core_hz(), device_hz);
+        Ok(game)
     }
-    let ring = sink.ring();
-    let device_hz = match ring.sample_rate() {
-        0 => av.sample_rate,
-        hz => hz as f64,
-    };
-    let known = console.period.is_some();
-    let mut period = console.period.unwrap_or(FIRST_PERIOD);
-    let core_hz = |period: Duration| av.sample_rate / (av.fps * period.as_secs_f64());
-    let mut resampler = Resampler::new(core_hz(period), device_hz);
-    let mut out = Vec::new();
 
-    let Console {
-        surface,
-        picture,
-        input,
-        started,
-        panel,
-        ..
-    } = console;
-    let mut pad = 0u16;
-    let mut menu = false;
-    let mut last_swap = Instant::now();
-    let mut swaps = Vec::with_capacity(64);
-    let mut slow = 0u32;
-    let mut frames = 0u64;
-    let mut times = Times::default();
-    let mut pushed = 0u64;
-    let mut window = (Instant::now(), 0u64, ring.drained_samples());
-    let measured = loop {
-        let mut quit = false;
-        for ev in input.poll(started.elapsed().as_millis() as u64) {
-            match ev {
-                RawEvent::Down(Btn::Menu) => menu = true,
-                RawEvent::Up(Btn::Menu) => menu = false,
-                RawEvent::Down(Btn::Start) if menu => quit = true,
-                RawEvent::Down(b) => pad |= bit(b),
-                RawEvent::Up(b) => pad &= !bit(b),
-            }
-        }
-        if quit {
-            eprintln!("tray: quit after {frames} frames, {slow} slow");
-            break swaps.len() == 60;
-        }
+    /// The core's sample rate as played: it makes 60 frames a second of
+    /// sound, but the panel shows a little under 60.
+    fn core_hz(&self) -> f64 {
+        self.rate / (self.fps * self.period.as_secs_f64())
+    }
 
+    /// The panel's refresh as measured, once it has been.
+    pub fn period(&self) -> Option<Duration> {
+        self.swaps.is_none().then_some(self.period)
+    }
+
+    /// Takes one button event. True when it asks to quit.
+    pub fn handle(&mut self, ev: RawEvent) -> bool {
+        match ev {
+            RawEvent::Down(Btn::Menu) => self.menu = true,
+            RawEvent::Up(Btn::Menu) => self.menu = false,
+            RawEvent::Down(Btn::Start) if self.menu => return true,
+            RawEvent::Down(b) => self.pad |= bit(b),
+            RawEvent::Up(b) => self.pad &= !bit(b),
+        }
+        false
+    }
+
+    /// Lets go of every button, as when the game loses them for a while.
+    pub fn release_all(&mut self) {
+        self.pad = 0;
+        self.menu = false;
+    }
+
+    /// Runs one frame, queues its sound at `volume` and uploads its picture.
+    pub fn frame(&mut self, picture: &mut PicturePass, volume_level: u8) {
         let work = Instant::now();
-        core.run_frame(ButtonMask(pad));
+        self.core.run_frame(ButtonMask(self.pad));
         let emulated = Instant::now();
-        let audio = core.take_audio();
-        let target = drc_target(ring.capacity_frames());
-        resampler.set_ratio(drc_ratio(ring.queued_frames(), target));
-        resampler.process(&audio, &mut out);
-        ring.push(&out);
-        pushed += out.len() as u64;
+        let mut audio = self.core.take_audio();
+        volume::apply(&mut audio, volume_level);
+        let target = drc_target(self.ring.capacity_frames());
+        self.resampler
+            .set_ratio(drc_ratio(self.ring.queued_frames(), target));
+        self.resampler.process(&audio, &mut self.out);
+        self.ring.push(&self.out);
+        self.pushed += self.out.len() as u64;
 
-        let (px, w, h, format) = core.frame_raw();
+        let (px, w, h, format) = self.core.frame_raw();
         match format {
             PixelFormat::Rgb565 => picture.upload_as(FrameLayout::Rgb565, px, w, h),
             PixelFormat::Xrgb8888 => picture.upload(px, w, h),
             PixelFormat::Xrgb1555 => picture.upload(&to_xrgb8888(format, px, w, h), w, h),
         }
         let uploaded = Instant::now();
-        if uploaded - work > period {
-            slow += 1;
+        if uploaded - work > self.period {
+            self.slow += 1;
         }
-        picture.draw(*panel);
-        if let Err(e) = surface.swap() {
-            eprintln!("tray: swap: {e}");
-        }
-        times.add(emulated - work, uploaded - emulated, uploaded.elapsed());
-        frames += 1;
+        self.work = (emulated - work, uploaded - emulated);
+    }
 
-        // Learn the panel's real refresh from the first second of swaps,
-        // then pace audio to it so the gap to the core's 60 fps never
-        // reaches the rate control. Later games reuse what this learned.
+    /// Notes a swap after a frame: learns the panel's refresh from the
+    /// first second of them and logs how play is going every ten seconds.
+    pub fn swapped(&mut self, presented: Duration) {
+        self.times.add(self.work.0, self.work.1, presented);
+        self.frames += 1;
         let now = Instant::now();
-        let seen = now - last_swap;
-        last_swap = now;
-        if !known
-            && (60..120).contains(&frames)
-            && seen > Duration::from_millis(12)
-            && seen < Duration::from_millis(22)
-        {
-            swaps.push(seen);
+        let seen = now - self.last_swap;
+        self.last_swap = now;
+        if let Some(swaps) = &mut self.swaps {
+            if (60..120).contains(&self.frames)
+                && seen > Duration::from_millis(12)
+                && seen < Duration::from_millis(22)
+            {
+                swaps.push(seen);
+            }
             if swaps.len() == 60 {
                 swaps.sort();
-                period = swaps[30];
-                resampler = Resampler::new(core_hz(period), device_hz);
-                eprintln!("tray: panel refresh {:.3} Hz", 1.0 / period.as_secs_f64());
+                self.period = swaps[30];
+                self.swaps = None;
+                self.resampler = Resampler::new(self.core_hz(), self.device_hz);
+                eprintln!(
+                    "tray: panel refresh {:.3} Hz",
+                    1.0 / self.period.as_secs_f64()
+                );
             }
         }
-        if frames.is_multiple_of(600) {
-            eprintln!(
-                "tray: {frames} frames, {slow} slow, {} underruns, {} overruns, {}x{}",
-                ring.underruns(),
-                ring.overruns(),
-                w,
-                h
-            );
-            eprintln!("tray:   {}", times.report());
-            let (since, was_pushed, was_drained) = window;
-            let secs = since.elapsed().as_secs_f64();
-            let drained = ring.drained_samples();
-            eprintln!(
-                "tray:   audio Hz: made {:.0}, played {:.0}, queued {} of {} frames",
-                (pushed - was_pushed) as f64 / 2.0 / secs,
-                (drained - was_drained) as f64 / 2.0 / secs,
-                ring.queued_frames(),
-                ring.capacity_frames()
-            );
-            window = (Instant::now(), pushed, drained);
-            times = Times::default();
+        if self.frames.is_multiple_of(600) {
+            self.report();
         }
-    };
-    if measured {
-        console.period = Some(period);
     }
-    Ok(())
+
+    fn report(&mut self) {
+        let (_, w, h, _) = self.core.frame_raw();
+        eprintln!(
+            "tray: {} frames, {} slow, {} underruns, {} overruns, {w}x{h}",
+            self.frames,
+            self.slow,
+            self.ring.underruns(),
+            self.ring.overruns(),
+        );
+        eprintln!("tray:   {}", self.times.report());
+        let (since, was_pushed, was_drained) = self.window;
+        let secs = since.elapsed().as_secs_f64();
+        let drained = self.ring.drained_samples();
+        eprintln!(
+            "tray:   audio Hz: made {:.0}, played {:.0}, queued {} of {} frames",
+            (self.pushed - was_pushed) as f64 / 2.0 / secs,
+            (drained - was_drained) as f64 / 2.0 / secs,
+            self.ring.queued_frames(),
+            self.ring.capacity_frames()
+        );
+        self.window = (Instant::now(), self.pushed, drained);
+        self.times = Times::default();
+    }
+
+    /// Ends play: unloads the core, which writes its memory cards, and
+    /// gives `sink` back at slot's rate. Returns the measured refresh.
+    pub fn finish(self, sink: &mut dyn AudioSink) -> Option<Duration> {
+        eprintln!(
+            "tray: quit after {} frames, {} slow",
+            self.frames, self.slow
+        );
+        let period = self.period();
+        drop(self.core);
+        if let Err(e) = sink.open(GBA_HZ) {
+            eprintln!("tray: audio: {e}");
+        }
+        period
+    }
 }
 
 /// Where each frame's time went, over the frames since the last report.
@@ -214,7 +268,7 @@ impl Times {
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let pair = |(sum, max): (Duration, Duration)| format!("{:.1}/{:.1}", ms(sum / n), ms(max));
         format!(
-            "ms avg/max: emulate {}, upload {}, draw+swap {}",
+            "ms avg/max: emulate {}, upload {}, swap {}",
             pair(self.emulate),
             pair(self.upload),
             pair(self.present)

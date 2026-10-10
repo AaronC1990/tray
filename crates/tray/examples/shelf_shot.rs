@@ -17,7 +17,11 @@ fn main() {
     let panel = (640u32, 480u32);
     let mut overlay = Overlay::new(&surface, panel).unwrap();
     let mut view = ShelfView::new(&mut overlay, panel, Path::new(&a[2]));
-    let mut c = Carousel::new(games.len(), 0);
+    let initials = games
+        .iter()
+        .map(|g| slot_store::initial(&g.title))
+        .collect();
+    let mut c = Carousel::new(initials, 0);
     for i in 0..steps {
         c.handle(RawEvent::Down(Btn::Right), i as u64 * 10);
         c.handle(RawEvent::Up(Btn::Right), i as u64 * 10 + 5);
@@ -32,6 +36,21 @@ fn main() {
     view.draw(&mut overlay, &games, &c);
     view.tick(0.7, Some(c.selected()));
     view.draw(&mut overlay, &games, &c);
+    // SLIDE=<dx>: as tray shows the shelf sliding off over another screen,
+    // here a plain red one.
+    if let Some(dx) = std::env::var("SLIDE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        overlay.snapshot();
+        overlay.draw([0.6, 0.1, 0.1], &[]);
+        overlay.draw_over(
+            &overlay
+                .snapshot_draw(dx, 1.0)
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
+    }
     let mut px = vec![0u8; 640 * 480 * 4];
     unsafe {
         gl::ReadPixels(

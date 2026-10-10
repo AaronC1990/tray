@@ -490,6 +490,32 @@ impl Frontend {
         self.session.update(dt);
     }
 
+    /// Like `advance`, with events another owner of the buttons already
+    /// polled and chose to pass on.
+    pub fn advance_events(&mut self, events: Vec<slot_input::RawEvent>) {
+        let now = self.now();
+        if self.rebuild.is_some() {
+            return;
+        }
+        self.session.feed(events, now);
+        let dt = self.last.elapsed().as_secs_f32();
+        self.last = Instant::now();
+        self.session.update(dt);
+    }
+
+    /// Hands the buttons back to slot with none held.
+    pub fn take_input_back(&mut self) {
+        self.session.release_input();
+    }
+
+    pub fn app_mut(&mut self) -> &mut crate::app::App {
+        self.session.app_mut()
+    }
+
+    pub fn audio_sink(&mut self) -> &mut dyn crate::audio::AudioSink {
+        self.session.sink_mut()
+    }
+
     pub fn app(&self) -> &crate::app::App {
         self.session.app()
     }
@@ -504,7 +530,7 @@ impl Frontend {
         self.session.update(dt);
     }
 
-    fn now(&self) -> Millis {
+    pub fn now(&self) -> Millis {
         self.start.elapsed().as_millis() as Millis
     }
 

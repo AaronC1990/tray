@@ -51,6 +51,7 @@ pub struct ShelfView {
     title: Caption,
     count: Caption,
     hints: [Caption; 2],
+    system: Caption,
 }
 
 /// White text on a clear face `w` by `h`, fitted to it.
@@ -121,8 +122,11 @@ impl ShelfView {
             Caption::new(overlay, 220, 22),
         ];
         hints[0].set(overlay, "A play", 1, 15.0, 10.0, grey);
-        hints[1].set(overlay, "Menu + Start exit", 1, 15.0, 10.0, grey);
+        hints[1].set(overlay, "L / R systems", 1, 15.0, 10.0, grey);
+        let mut system = Caption::new(overlay, 220, 24);
+        system.set(overlay, "PlayStation", 1, 16.0, 10.0, grey);
         ShelfView {
+            system,
             panel,
             labels: labels.to_path_buf(),
             pool: Vec::new(),
@@ -275,6 +279,14 @@ impl ShelfView {
             w: self.title.w as f32,
             h: self.title.h as f32,
             tex: self.title.tex,
+            alpha: 1.0,
+        });
+        items.push(Draw::Tex {
+            x: 18.0,
+            y: 14.0,
+            w: self.system.w as f32,
+            h: self.system.h as f32,
+            tex: self.system.tex,
             alpha: 1.0,
         });
         // With nothing to play, only the way out is worth showing.

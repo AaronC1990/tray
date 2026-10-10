@@ -68,6 +68,20 @@ impl Session {
         self.sink.ring().queued_frames()
     }
 
+    /// The sink slot plays through, for another player to borrow while
+    /// slot is idle on its shelf.
+    pub fn sink_mut(&mut self) -> &mut dyn AudioSink {
+        self.sink.as_mut()
+    }
+
+    /// Forgets every button held, as when slot takes the buttons back from
+    /// something that had them.
+    pub fn release_input(&mut self) {
+        self.gestures = Gestures::new();
+        self.pad.clear();
+        self.sync_pad();
+    }
+
     pub fn audio_ring(&self) -> std::sync::Arc<Ring> {
         self.sink.ring()
     }

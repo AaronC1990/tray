@@ -1,6 +1,11 @@
 use slot_input::{Btn, RawEvent};
 use tray::carousel::{Carousel, Pick};
 
+/// A row of `n` discs, each starting with its own letter.
+fn row(n: usize) -> Vec<char> {
+    ('A'..).take(n).collect()
+}
+
 fn tap(c: &mut Carousel, b: Btn, at: u64) -> Option<Pick> {
     let got = c.handle(RawEvent::Down(b), at);
     c.handle(RawEvent::Up(b), at + 10);
@@ -9,7 +14,7 @@ fn tap(c: &mut Carousel, b: Btn, at: u64) -> Option<Pick> {
 
 #[test]
 fn a_plays_the_picked_disc() {
-    let mut c = Carousel::new(6, 0);
+    let mut c = Carousel::new(row(6), 0);
     tap(&mut c, Btn::Right, 0);
     tap(&mut c, Btn::Right, 20);
     assert_eq!(tap(&mut c, Btn::A, 40), Some(Pick::Play(2)));
@@ -17,7 +22,7 @@ fn a_plays_the_picked_disc() {
 
 #[test]
 fn a_long_shelf_wraps_both_ways() {
-    let mut c = Carousel::new(6, 0);
+    let mut c = Carousel::new(row(6), 0);
     tap(&mut c, Btn::Left, 0);
     assert_eq!(c.selected(), 5);
     tap(&mut c, Btn::Right, 20);
@@ -27,7 +32,7 @@ fn a_long_shelf_wraps_both_ways() {
 
 #[test]
 fn a_short_shelf_stops_at_its_ends() {
-    let mut c = Carousel::new(2, 0);
+    let mut c = Carousel::new(row(2), 0);
     tap(&mut c, Btn::Left, 0);
     assert_eq!(c.selected(), 0);
     tap(&mut c, Btn::Right, 20);
@@ -42,16 +47,39 @@ fn a_short_shelf_stops_at_its_ends() {
 }
 
 #[test]
-fn menu_and_start_quit_but_start_alone_does_not() {
-    let mut c = Carousel::new(3, 0);
-    assert_eq!(tap(&mut c, Btn::Start, 0), None);
-    c.handle(RawEvent::Down(Btn::Menu), 10);
-    assert_eq!(c.handle(RawEvent::Down(Btn::Start), 20), Some(Pick::Quit));
+fn the_shoulders_ask_for_the_next_system() {
+    let mut c = Carousel::new(row(3), 1);
+    assert_eq!(tap(&mut c, Btn::L1, 0), Some(Pick::Switch(-1)));
+    assert_eq!(tap(&mut c, Btn::R1, 20), Some(Pick::Switch(1)));
+    assert_eq!(c.selected(), 1, "a shoulder moved the row");
+}
+
+#[test]
+fn up_and_down_jump_between_letters() {
+    let mut c = Carousel::new("AABBBCD".chars().collect(), 3);
+    tap(&mut c, Btn::Down, 0);
+    assert_eq!(c.selected(), 5, "down goes to the first C");
+    tap(&mut c, Btn::Up, 20);
+    assert_eq!(c.selected(), 2, "up goes to the first of the letter before");
+    tap(&mut c, Btn::Up, 40);
+    assert_eq!(c.selected(), 0);
+    tap(&mut c, Btn::Up, 60);
+    assert_eq!(
+        c.selected(),
+        6,
+        "up from the first letter wraps to the last"
+    );
+    tap(&mut c, Btn::Down, 80);
+    assert_eq!(
+        c.selected(),
+        0,
+        "down from the last letter wraps to the first"
+    );
 }
 
 #[test]
 fn an_empty_shelf_plays_nothing() {
-    let mut c = Carousel::new(0, 0);
+    let mut c = Carousel::new(row(0), 0);
     assert_eq!(tap(&mut c, Btn::A, 0), None);
     tap(&mut c, Btn::Right, 20);
     assert!(c.placed(2.2).is_empty());
@@ -59,7 +87,7 @@ fn an_empty_shelf_plays_nothing() {
 
 #[test]
 fn a_held_direction_repeats_after_a_pause() {
-    let mut c = Carousel::new(20, 0);
+    let mut c = Carousel::new(row(20), 0);
     c.handle(RawEvent::Down(Btn::Right), 0);
     c.tick(300, 0.016);
     assert_eq!(c.selected(), 1, "repeated before the pause");
@@ -72,7 +100,7 @@ fn a_held_direction_repeats_after_a_pause() {
 
 #[test]
 fn the_row_slides_to_the_pick_and_settles_there() {
-    let mut c = Carousel::new(8, 0);
+    let mut c = Carousel::new(row(8), 0);
     tap(&mut c, Btn::Right, 0);
     assert!(!c.settled());
     let mid = c.placed(2.2);
@@ -94,7 +122,7 @@ fn the_row_slides_to_the_pick_and_settles_there() {
 
 #[test]
 fn wrapping_slides_the_short_way_round() {
-    let mut c = Carousel::new(8, 0);
+    let mut c = Carousel::new(row(8), 0);
     tap(&mut c, Btn::Left, 0);
     c.tick(20, 1.0 / 60.0);
     let placed = c.placed(2.2);

@@ -2183,6 +2183,7 @@ dependencies = [
  "slot",
  "slot-gfx",
  "slot-input",
+ "slot-power",
  "slot-retro",
  "slot-store",
  "slot-ui",

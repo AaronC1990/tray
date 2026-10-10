@@ -6,8 +6,6 @@ use slot_input::{Btn, RawEvent};
 /// repeats after that.
 const REPEAT_AFTER_MS: u64 = 320;
 const REPEAT_EVERY_MS: u64 = 85;
-/// How many discs L1 and R1 skip.
-const JUMP: i64 = 5;
 /// The row never trails the pick by more than this many discs, so a long
 /// held scroll keeps up.
 const MAX_LAG: f32 = 1.5;
@@ -18,7 +16,8 @@ const WRAP_FROM: usize = 4;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Pick {
     Play(usize),
-    Quit,
+    /// Move to the next system's shelf, -1 for left and 1 for right.
+    Switch(i32),
 }
 
 pub struct Carousel {
@@ -29,18 +28,56 @@ pub struct Carousel {
     /// Where the row is, in discs; eases toward `target`.
     pos: f32,
     held: Option<(Btn, u64)>,
-    menu: bool,
+    /// Each disc's first letter, for Up and Down to jump between.
+    initials: Vec<char>,
 }
 
 impl Carousel {
-    pub fn new(len: usize, selected: usize) -> Self {
+    /// A row of discs whose titles start with `initials`, in shelf order.
+    pub fn new(initials: Vec<char>, selected: usize) -> Self {
+        let len = initials.len();
         let target = selected.min(len.saturating_sub(1)) as i64;
         Carousel {
             len,
             target,
             pos: target as f32,
             held: None,
-            menu: false,
+            initials,
+        }
+    }
+
+    /// Moves to the first disc of the next letter, or of this letter's
+    /// previous one going back, as slot's shelf does with Up and Down.
+    fn jump_letter(&mut self, dir: i32) {
+        if self.len == 0 {
+            return;
+        }
+        let at = self.selected();
+        let letter = |i: usize| self.initials[i];
+        let start_of = |mut i: usize| {
+            while i > 0 && letter(i - 1) == letter(i) {
+                i -= 1;
+            }
+            i
+        };
+        let to = match dir > 0 {
+            true => (at + 1..self.len).find(|&i| letter(i) != letter(at)),
+            false => match start_of(at) {
+                0 => None,
+                g => Some(start_of(g - 1)),
+            },
+        };
+        let to = match (to, self.wraps(), dir > 0) {
+            (Some(to), _, _) => to,
+            (None, false, _) => return,
+            (None, true, true) => 0,
+            (None, true, false) => start_of(self.len - 1),
+        };
+        if to != at {
+            // Slide the way the jump goes, even when it wraps round.
+            let n = self.len as i64;
+            let ahead = (to as i64 - at as i64).rem_euclid(n);
+            self.step(if dir > 0 { ahead } else { ahead - n });
         }
     }
 
@@ -76,16 +113,15 @@ impl Carousel {
     /// Takes one button event; returns what it asks for, if anything.
     pub fn handle(&mut self, ev: RawEvent, now_ms: u64) -> Option<Pick> {
         match ev {
-            RawEvent::Down(Btn::Menu) => self.menu = true,
-            RawEvent::Up(Btn::Menu) => self.menu = false,
-            RawEvent::Down(Btn::Start) if self.menu => return Some(Pick::Quit),
             RawEvent::Down(Btn::A) if self.len > 0 => return Some(Pick::Play(self.selected())),
             RawEvent::Down(b @ (Btn::Left | Btn::Right)) => {
                 self.step(if b == Btn::Left { -1 } else { 1 });
                 self.held = Some((b, now_ms + REPEAT_AFTER_MS));
             }
-            RawEvent::Down(Btn::L1) => self.step(-JUMP),
-            RawEvent::Down(Btn::R1) => self.step(JUMP),
+            RawEvent::Down(Btn::L1) => return Some(Pick::Switch(-1)),
+            RawEvent::Down(Btn::R1) => return Some(Pick::Switch(1)),
+            RawEvent::Down(Btn::Up) => self.jump_letter(-1),
+            RawEvent::Down(Btn::Down) => self.jump_letter(1),
             RawEvent::Up(b) if self.held.is_some_and(|(h, _)| h == b) => self.held = None,
             _ => {}
         }
@@ -95,7 +131,6 @@ impl Carousel {
     /// Lets go of anything held, as when a game takes over the buttons.
     pub fn release_all(&mut self) {
         self.held = None;
-        self.menu = false;
     }
 
     /// Repeats a held direction and moves the row `dt` seconds on.
