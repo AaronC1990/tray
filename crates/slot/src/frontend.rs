@@ -364,6 +364,11 @@ impl Frontend {
         self.session.set_plain_triggers(on);
     }
 
+    /// Shows slot's fast-forward badge for another frontend's game.
+    pub fn set_outside_ff(&mut self, on: bool) {
+        self.session.set_outside_ff(on);
+    }
+
     /// The buttons the game is being given, after slot has taken its own.
     pub fn game_pad(&self) -> slot_retro::ButtonMask {
         self.session.game_pad()

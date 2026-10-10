@@ -16,7 +16,7 @@ use slot_store::initial;
 use tray::carousel::{Carousel, Pick};
 use tray::library::{scan, Game};
 use tray::motion::{Eject, Insert, Swap};
-use tray::play::{state_ring, Ask, Combos, DiscGame, SAVES};
+use tray::play::{state_ring, Ask, Combos, DiscGame, Fast, SAVES};
 use tray::shelf::{Look, ShelfView};
 
 const CARD: &str = "/mnt/sdcard";
@@ -64,6 +64,8 @@ struct Play {
     /// Seconds into dipping to black before quitting, once asked to quit.
     outro: Option<f32>,
     combos: Combos,
+    /// Fast forward, latched on by MENU + R2.
+    fast: bool,
 }
 
 /// A plain black veil over the whole panel.
@@ -355,6 +357,7 @@ fn main() {
                             intro: 0.0,
                             outro: None,
                             combos: Combos::default(),
+                            fast: false,
                         })));
                     }
                 }
@@ -366,6 +369,7 @@ fn main() {
                     swap,
                     intro,
                     outro,
+                    fast,
                     ..
                 } = play.as_mut();
                 // A disc change or quitting takes the combinations until done.
@@ -374,6 +378,10 @@ fn main() {
                     match ask {
                         // Out as slot ejects a cart, keeping its place.
                         Ask::Quit => frontend.app_mut().eject_outside(),
+                        Ask::FastForward => {
+                            *fast = !*fast;
+                            frontend.set_outside_ff(*fast);
+                        }
                         Ask::Disc(by) => {
                             let (from, count) = (game.disc(), game.disc_count());
                             let to = from as i64 + by as i64;
@@ -413,7 +421,14 @@ fn main() {
                         Some(_) => ButtonMask(0),
                         None => frontend.game_pad(),
                     };
-                    game.frame(&mut picture, frontend.app().output_volume(), pad);
+                    // At the speed and with the sound slot's settings give
+                    // fast forward, but never through a disc change.
+                    let app = frontend.app();
+                    let speed = (*fast && swap.is_none()).then(|| Fast {
+                        speed: app.ff_speed(),
+                        sound: app.ff_sound(),
+                    });
+                    game.frame(&mut picture, app.output_volume(), pad, speed);
                     if let Some(s) = swap {
                         sound = s.tick(dt, game);
                         if s.done() {
@@ -436,6 +451,7 @@ fn main() {
                 Mode::Playing(play) => {
                     // slot lets go of the game before it is unloaded.
                     frontend.app_mut().unseat_outside();
+                    frontend.set_outside_ff(false);
                     frontend.set_plain_triggers(false);
                     frontend.take_input_back();
                     period = play.game.finish(frontend.audio_sink()).or(period);

@@ -30,6 +30,8 @@ pub struct Session {
     reloading: bool,
     driven: bool,
     plain_triggers: bool,
+    /// Another frontend's game is fast-forwarding, latched on.
+    outside_ff: bool,
 }
 
 impl Session {
@@ -52,6 +54,7 @@ impl Session {
             reloading: false,
             driven: false,
             plain_triggers: false,
+            outside_ff: false,
         }
     }
 
@@ -89,6 +92,11 @@ impl Session {
     pub fn set_plain_triggers(&mut self, on: bool) {
         self.plain_triggers = on;
         self.gestures.set_plain_triggers(on);
+    }
+
+    /// Shows slot's fast-forward badge for another frontend's game.
+    pub fn set_outside_ff(&mut self, on: bool) {
+        self.outside_ff = on;
     }
 
     /// The buttons the game is being given, after slot has taken its own.
@@ -313,6 +321,9 @@ impl Session {
     }
 
     fn sync_ff_hud(&mut self) {
+        if self.outside_ff {
+            return self.app.set_ff(FfState::Latched);
+        }
         let ff = match (self.actually_fast_forwarding(), self.gestures.ff_latched()) {
             (false, _) => FfState::Off,
             (true, false) => FfState::Held,

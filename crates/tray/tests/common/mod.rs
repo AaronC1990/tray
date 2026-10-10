@@ -37,7 +37,7 @@ pub fn card_with(discs: &[&str]) -> Option<tempfile::TempDir> {
 
 pub fn run(game: &mut DiscGame, picture: &mut PicturePass, frames: u32) {
     for _ in 0..frames {
-        game.frame(picture, 100, slot_retro::ButtonMask(0));
+        game.frame(picture, 100, slot_retro::ButtonMask(0), None);
     }
 }
 

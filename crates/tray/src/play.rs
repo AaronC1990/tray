@@ -51,6 +51,10 @@ pub struct DiscGame {
     card_written: Option<Vec<u8>>,
     /// Where the disc in play is remembered.
     disc_file: PathBuf,
+    /// Frames run beyond one a swap, under fast forward.
+    fast_frames: u64,
+    /// What one frame takes to run, in seconds, smoothed.
+    frame_cost: f32,
 }
 
 /// The file a game's memory card is kept in, named after the game rather
@@ -72,15 +76,45 @@ pub fn last_disc(root: &Path, stem: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// Fast forward as slot's settings have it: how many times normal speed
+/// to aim for, and whether to hear the game sped up or keep it quiet.
+#[derive(Copy, Clone, Debug)]
+pub struct Fast {
+    pub speed: u8,
+    pub sound: bool,
+}
+
+/// How many frames costing `cost` seconds each, plus `overhead` a swap,
+/// get closest to `speed` times normal when each swap waits for the next
+/// refresh every `period` seconds.
+pub fn plan_frames(speed: u8, cost: f32, overhead: f32, period: f32) -> u32 {
+    if cost <= 0.0 || period <= 0.0 {
+        return 1;
+    }
+    (1..=u32::from(speed.max(1)))
+        .map(|k| {
+            let refreshes = ((k as f32 * cost + overhead) / period).ceil().max(1.0);
+            (k, k as f32 / refreshes)
+        })
+        .fold((1, 0.0), |best, (k, rate)| match rate > best.1 + 1e-3 {
+            true => (k, rate),
+            false => best,
+        })
+        .0
+}
+
 /// What a button combination asks of the game, beyond playing it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
     Quit,
     /// Change to the next disc (1) or the one before (-1).
     Disc(i32),
+    /// Turn fast forward on, or off again.
+    FastForward,
 }
 
-/// MENU with START to quit and with L or R to change discs. The buttons
+/// MENU with START to quit, with L or R to change discs, and with R2 to
+/// fast-forward. The buttons
 /// pressed with MENU are kept from slot and the game.
 #[derive(Default)]
 pub struct Combos {
@@ -104,6 +138,7 @@ impl Combos {
             RawEvent::Down(b @ Btn::Start) if self.menu => Some((b, Ask::Quit)),
             RawEvent::Down(b @ Btn::R1) if self.menu => Some((b, Ask::Disc(1))),
             RawEvent::Down(b @ Btn::L1) if self.menu => Some((b, Ask::Disc(-1))),
+            RawEvent::Down(b @ Btn::R2) if self.menu => Some((b, Ask::FastForward)),
             RawEvent::Up(b) if self.held.contains(&b) => {
                 self.held.retain(|h| *h != b);
                 return (None, false);
@@ -296,6 +331,8 @@ impl DiscGame {
             card,
             card_written,
             disc_file: disc_path(root, &game.stem),
+            fast_frames: 0,
+            frame_cost: 0.0,
         };
         game.resampler = Resampler::new(game.core_hz(), device_hz);
         Ok(game)
@@ -310,6 +347,21 @@ impl DiscGame {
     /// The panel's refresh as measured, once it has been.
     pub fn period(&self) -> Option<Duration> {
         self.swaps.is_none().then_some(self.period)
+    }
+
+    /// How many frames to run before the next swap to get closest to
+    /// `speed` times normal. Swaps wait for the panel, so a few frames
+    /// that just spill into another refresh waste the rest of it: three
+    /// frames that fit in two refreshes beat two that need two as well.
+    fn plan(&self, speed: u8) -> u32 {
+        // Uploading the picture and swapping, beside running frames.
+        let overhead = self.work.1.as_secs_f32() + 0.002;
+        plan_frames(speed, self.frame_cost, overhead, self.period.as_secs_f32())
+    }
+
+    /// Frames run beyond one a swap under fast forward, so far.
+    pub fn fast_frames(&self) -> u64 {
+        self.fast_frames
     }
 
     /// What slot saves and loads states through.
@@ -347,21 +399,60 @@ impl DiscGame {
         let _ = std::fs::write(&self.disc_file, format!("{index}\n"));
     }
 
-    /// Runs one frame with `pad` held, queues its sound at `volume_level`
-    /// and uploads its picture.
-    pub fn frame(&mut self, picture: &mut PicturePass, volume_level: u8, pad: ButtonMask) {
+    /// Runs one frame with `pad` held, or under fast forward as many as
+    /// fit before the next swap, up to the speed asked for; queues the sound
+    /// at `volume_level` and uploads the last picture.
+    pub fn frame(
+        &mut self,
+        picture: &mut PicturePass,
+        volume_level: u8,
+        pad: ButtonMask,
+        fast: Option<Fast>,
+    ) {
         let mut core = self.core.borrow_mut();
         let work = Instant::now();
-        core.run_frame(pad);
+        let steps = fast.map_or(1, |f| self.plan(f.speed));
+        let heard = fast.is_none_or(|f| f.sound);
+        if self.ring.muted() == heard {
+            self.ring.set_muted(!heard);
+        }
+        let mut audio = Vec::new();
+        let mut ran = 0u32;
+        loop {
+            core.run_frame(pad);
+            ran += 1;
+            let sound = core.take_audio();
+            if heard {
+                audio.extend_from_slice(&sound);
+            }
+            if ran >= steps {
+                break;
+            }
+        }
         let emulated = Instant::now();
-        let mut audio = core.take_audio();
-        volume::apply(&mut audio, volume_level);
-        let target = drc_target(self.ring.capacity_frames());
-        self.resampler
-            .set_ratio(drc_ratio(self.ring.queued_frames(), target));
-        self.resampler.process(&audio, &mut self.out);
-        self.ring.push(&self.out);
-        self.pushed += self.out.len() as u64;
+        // What a frame costs, smoothed, to plan the next swap's frames by.
+        let each = (emulated - work).as_secs_f32() / ran as f32;
+        self.frame_cost = match self.frame_cost {
+            0.0 => each,
+            was => was * 0.9 + each * 0.1,
+        };
+        if heard {
+            volume::apply(&mut audio, volume_level);
+            // Several frames' sound plays in the refreshes they take to show,
+            // sped up, as slot plays a cart's under fast forward.
+            let period = self.period.as_secs_f64();
+            let took = (emulated - work).as_secs_f64() + self.work.1.as_secs_f64() + 0.002;
+            let refreshes = match ran {
+                1 => 1.0,
+                _ => (took / period).ceil().max(1.0),
+            };
+            let target = drc_target(self.ring.capacity_frames());
+            let ratio = drc_ratio(self.ring.queued_frames(), target) * refreshes / f64::from(ran);
+            self.resampler.set_ratio(ratio);
+            self.resampler.process(&audio, &mut self.out);
+            self.ring.push(&self.out);
+            self.pushed += self.out.len() as u64;
+        }
 
         let (px, w, h, format) = core.frame_raw();
         match format {
@@ -370,9 +461,10 @@ impl DiscGame {
             PixelFormat::Xrgb1555 => picture.upload(&to_xrgb8888(format, px, w, h), w, h),
         }
         let uploaded = Instant::now();
-        if uploaded - work > self.period {
+        if fast.is_none() && uploaded - work > self.period {
             self.slow += 1;
         }
+        self.fast_frames += u64::from(ran - 1);
         self.work = (emulated - work, uploaded - emulated);
     }
 
@@ -430,9 +522,10 @@ impl DiscGame {
     fn report(&mut self) {
         let (_, w, h, _) = self.core.borrow().frame_raw();
         eprintln!(
-            "tray: {} frames, {} slow, {} underruns, {} overruns, {w}x{h}",
+            "tray: {} frames, {} slow, {} fast-forwarded, {} underruns, {} overruns, {w}x{h}",
             self.frames,
             self.slow,
+            self.fast_frames,
             self.ring.underruns(),
             self.ring.overruns(),
         );
