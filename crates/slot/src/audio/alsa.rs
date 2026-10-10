@@ -196,10 +196,21 @@ impl AudioSink for AlsaSink {
     }
 }
 
+/// An open PCM handle, carried to the thread that opened or will close it.
+struct Pcm(*mut c_void);
+
+// SAFETY: a handle is used by one thread at a time; it moves whole between
+// the playback thread and the helper that opens or closes it.
+unsafe impl Send for Pcm {}
+
 struct Playback {
-    alsa: Alsa,
+    alsa: Arc<Alsa>,
     pcm: Option<*mut c_void>,
     rate: u32,
+    /// The device being opened in the background, once it reports back.
+    opening: Option<mpsc::Receiver<Result<Pcm, AudioError>>>,
+    /// The device being closed in the background.
+    closing: Option<JoinHandle<()>>,
 }
 
 fn play(ring: &Arc<Ring>, sample_rate: u32) -> Result<Playback, AudioError> {
@@ -207,9 +218,11 @@ fn play(ring: &Arc<Ring>, sample_rate: u32) -> Result<Playback, AudioError> {
     let pcm = alsa.open_pcm(sample_rate)?;
     ring.reopen(sample_rate);
     Ok(Playback {
-        alsa,
+        alsa: Arc::new(alsa),
         pcm: Some(pcm),
         rate: sample_rate,
+        opening: None,
+        closing: None,
     })
 }
 
@@ -223,7 +236,14 @@ impl Playback {
         // Sleeping a period each time drains slower than that, since every
         // sleep runs a little long; the metronome keeps to the clock.
         let mut metronome = Metronome::new(span);
+        // Opening and closing the device each take a quarter of a second on
+        // the H700. Done here, they stall the drain and the ring overflows,
+        // dropping the start of whatever sound woke the device. They run on
+        // helper threads instead, and the ring drains by the clock meanwhile.
         while !stop.load(Ordering::Relaxed) {
+            if !self.take_opened() {
+                return;
+            }
             ring.fill(&mut buf);
             let hold = silence.hear(&buf, span);
             match (self.pcm, hold) {
@@ -231,13 +251,7 @@ impl Playback {
                     self.release();
                     eprintln!("slot: audio released after silence");
                 }
-                (None, true) => match self.alsa.open_pcm(self.rate) {
-                    Ok(pcm) => self.pcm = Some(pcm),
-                    Err(e) => {
-                        eprintln!("slot: audio: {e}");
-                        return;
-                    }
-                },
+                (None, true) if self.opening.is_none() => self.open_behind(),
                 _ => {}
             }
             match self.pcm {
@@ -281,18 +295,97 @@ impl Playback {
         true
     }
 
-    fn release(&mut self) {
-        if let Some(pcm) = self.pcm.take() {
-            unsafe {
-                (self.alsa.drop)(pcm);
-                (self.alsa.close)(pcm);
+    /// Starts opening the device on a helper thread, after any close still
+    /// in flight, since the device may refuse to open while it is closing.
+    fn open_behind(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let alsa = self.alsa.clone();
+        let rate = self.rate;
+        let closing = self.closing.take();
+        let opener = std::thread::Builder::new()
+            .name("slot-audio-open".into())
+            .spawn(move || {
+                if let Some(c) = closing {
+                    let _ = c.join();
+                }
+                let _ = tx.send(alsa.open_pcm(rate).map(Pcm));
+            });
+        match opener {
+            Ok(_) => self.opening = Some(rx),
+            Err(e) => eprintln!("slot: audio: open thread: {e}"),
+        }
+    }
+
+    /// Picks up a device the helper finished opening. False when opening
+    /// failed, which ends playback as a failed open always has.
+    fn take_opened(&mut self) -> bool {
+        let Some(rx) = &self.opening else {
+            return true;
+        };
+        match rx.try_recv() {
+            Ok(Ok(pcm)) => {
+                self.pcm = Some(pcm.0);
+                self.opening = None;
+                true
             }
+            Ok(Err(e)) => {
+                eprintln!("slot: audio: {e}");
+                self.opening = None;
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.opening = None;
+                true
+            }
+        }
+    }
+
+    /// Lets the device go, closing it on a helper thread.
+    fn release(&mut self) {
+        let Some(raw) = self.pcm.take() else {
+            return;
+        };
+        let alsa = self.alsa.clone();
+        let handle = Pcm(raw);
+        let closer = std::thread::Builder::new()
+            .name("slot-audio-close".into())
+            .spawn(move || close(&alsa, handle));
+        match closer {
+            Ok(join) => self.closing = Some(join),
+            // The closure never ran, so the handle is still open: close it here.
+            Err(_) => close(&self.alsa, Pcm(raw)),
+        }
+    }
+}
+
+fn close(alsa: &Alsa, pcm: Pcm) {
+    unsafe {
+        (alsa.drop)(pcm.0);
+        (alsa.close)(pcm.0);
+    }
+}
+
+impl Playback {
+    /// Waits out any open or close still in flight and closes what is open,
+    /// so nothing is left holding the device once playback ends.
+    fn finish(&mut self) {
+        if let Some(pcm) = self.pcm.take() {
+            close(&self.alsa, Pcm(pcm));
+        }
+        if let Some(rx) = self.opening.take() {
+            if let Ok(Ok(pcm)) = rx.recv() {
+                close(&self.alsa, pcm);
+            }
+        }
+        if let Some(c) = self.closing.take() {
+            let _ = c.join();
         }
     }
 }
 
 impl Drop for Playback {
     fn drop(&mut self) {
-        self.release();
+        self.finish();
     }
 }
