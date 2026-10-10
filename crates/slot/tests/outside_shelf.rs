@@ -109,3 +109,68 @@ fn the_outside_shelf_is_drawn_in_slots_frame_and_named_in_the_slot() {
     a.draw(&mut out);
     assert!(!out.contains(&marker), "the outside shelf stayed up");
 }
+
+#[test]
+fn an_outside_game_saves_loads_and_ejects_as_a_cart_does() {
+    use common::StubSnapshot;
+    use slot_store::StateRing;
+    let (d, mut a) = gba_and_gb();
+    let dir = d.path().join("States/PS/pcsx_rearmed/Crash");
+    let (snapshot, loaded) = StubSnapshot::pair();
+    a.seat_outside("Crash".into(), StateRing::at(dir.clone()), snapshot);
+    assert!(a.outside_seated());
+    assert!(matches!(a.phase(), Phase::Playing { .. }));
+
+    a.apply(Action::SaveState);
+    let ring = StateRing::at(dir.clone());
+    let saved = ring.list().unwrap();
+    assert_eq!(saved.len(), 1, "the save went nowhere");
+
+    a.apply(Action::LoadState);
+    assert_eq!(
+        loaded.lock().unwrap().as_deref(),
+        Some(&[9u8; 1024][..]),
+        "the newest state was not loaded back"
+    );
+
+    a.apply(Action::Polaroids);
+    assert!(
+        matches!(a.phase(), Phase::Polaroids { .. }),
+        "no state browser"
+    );
+    a.apply(Action::GbaDown(Btn::B));
+    assert!(matches!(a.phase(), Phase::Playing { .. }));
+
+    a.apply(Action::Eject);
+    assert!(
+        a.take_outside_eject(),
+        "holding MENU did not ask the game out"
+    );
+    assert!(!a.take_outside_eject(), "an eject is taken once");
+    assert!(
+        ring.read_resume().unwrap().is_some(),
+        "no state was kept to resume from"
+    );
+    a.unseat_outside();
+    assert!(matches!(a.phase(), Phase::Shelf));
+    assert!(!a.outside_seated());
+}
+
+#[test]
+fn an_outside_game_leaves_slots_own_picture_settings_alone() {
+    use common::StubSnapshot;
+    use slot_store::StateRing;
+    let (d, mut a) = gba_and_gb();
+    let before = slot_store::read_slot_state(d.path());
+    a.seat_outside(
+        "Crash".into(),
+        StateRing::at(d.path().join("States/PS/x/Crash")),
+        StubSnapshot::boxed(),
+    );
+    a.apply(Action::ShaderNext);
+    a.apply(Action::ColourCorrectionToggle);
+    let after = slot_store::read_slot_state(d.path());
+    assert_eq!(before.shader_gba, after.shader_gba);
+    assert_eq!(before.shader_gb, after.shader_gb);
+    assert_eq!(before.colour_correction, after.colour_correction);
+}

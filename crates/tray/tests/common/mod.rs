@@ -37,10 +37,14 @@ pub fn card_with(discs: &[&str]) -> Option<tempfile::TempDir> {
 
 pub fn run(game: &mut DiscGame, picture: &mut PicturePass, frames: u32) {
     for _ in 0..frames {
-        game.frame(picture, 100);
+        game.frame(picture, 100, slot_retro::ButtonMask(0));
     }
 }
 
 pub fn start(root: &Path, game: &Game, sink: &mut StubSink) -> DiscGame {
-    DiscGame::start(root, game, sink, None).expect("the game starts")
+    resume(root, game, sink, None)
+}
+
+pub fn resume(root: &Path, game: &Game, sink: &mut StubSink, state: Option<Vec<u8>>) -> DiscGame {
+    DiscGame::start(root, game, sink, None, state).expect("the game starts")
 }

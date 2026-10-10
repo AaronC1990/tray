@@ -12,10 +12,14 @@ const MAX_LAG: f32 = 1.5;
 /// Below this many discs the row stops at its ends, since wrapping would
 /// show the same disc on both sides.
 const WRAP_FROM: usize = 4;
+/// Holding A this long starts a game fresh rather than resuming it, as on
+/// slot's shelves.
+const PLAY_HOLD_MS: u64 = 500;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Pick {
-    Play(usize),
+    /// Play this disc; fresh when true, rather than resuming.
+    Play(usize, bool),
     /// Move to the next system's shelf, -1 for left and 1 for right.
     Switch(i32),
     /// The pick jumped to another letter, which slot shows in its slot.
@@ -30,6 +34,8 @@ pub struct Carousel {
     /// Where the row is, in discs; eases toward `target`.
     pos: f32,
     held: Option<(Btn, u64)>,
+    /// When A went down, while it is held.
+    play_held: Option<u64>,
     /// Each disc's first letter, for Up and Down to jump between.
     initials: Vec<char>,
 }
@@ -44,6 +50,7 @@ impl Carousel {
             target,
             pos: target as f32,
             held: None,
+            play_held: None,
             initials,
         }
     }
@@ -117,7 +124,10 @@ impl Carousel {
     /// Takes one button event; returns what it asks for, if anything.
     pub fn handle(&mut self, ev: RawEvent, now_ms: u64) -> Option<Pick> {
         match ev {
-            RawEvent::Down(Btn::A) if self.len > 0 => return Some(Pick::Play(self.selected())),
+            RawEvent::Down(Btn::A) if self.len > 0 => self.play_held = Some(now_ms),
+            RawEvent::Up(Btn::A) if self.play_held.take().is_some() => {
+                return Some(Pick::Play(self.selected(), false))
+            }
             RawEvent::Down(b @ (Btn::Left | Btn::Right)) => {
                 self.step(if b == Btn::Left { -1 } else { 1 });
                 self.held = Some((b, now_ms + REPEAT_AFTER_MS));
@@ -135,6 +145,17 @@ impl Carousel {
     /// Lets go of anything held, as when a game takes over the buttons.
     pub fn release_all(&mut self) {
         self.held = None;
+        self.play_held = None;
+    }
+
+    /// A held long enough to start the picked disc fresh.
+    pub fn held_play(&mut self, now_ms: u64) -> Option<Pick> {
+        let at = self.play_held?;
+        if now_ms.saturating_sub(at) < PLAY_HOLD_MS {
+            return None;
+        }
+        self.play_held = None;
+        Some(Pick::Play(self.selected(), true))
     }
 
     /// Repeats a held direction and moves the row `dt` seconds on.

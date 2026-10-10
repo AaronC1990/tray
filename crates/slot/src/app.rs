@@ -285,6 +285,11 @@ pub struct App {
     outside: Option<Outside>,
     /// What the slot says while the outside shelf shows.
     outside_text: Option<String>,
+    /// Where an outside game's states are kept, while one is seated. slot
+    /// saves, loads, browses and resumes it as it does its own carts.
+    outside_ring: Option<StateRing>,
+    /// Whether the outside game has been asked to come out.
+    outside_eject: bool,
     /// Which way the shelf ring was left for the outside shelf, until taken.
     leaving: Option<i32>,
     shelves: Vec<(Platform, Shelf)>,
@@ -407,6 +412,8 @@ impl App {
             phase: Phase::Shelf,
             outside: None,
             outside_text: None,
+            outside_ring: None,
+            outside_eject: false,
             leaving: None,
             shelves,
             shelf_at,
@@ -578,6 +585,7 @@ impl App {
     /// onto the first shelf with carts going right, the last going left.
     pub fn enter_shelves(&mut self, by: i32) {
         self.set_outside(None);
+        self.outside_text = None;
         let mut order: Vec<usize> = (0..self.shelves.len()).collect();
         if by < 0 {
             order.reverse();
@@ -594,9 +602,6 @@ impl App {
     /// Shows another frontend's shelf in place of slot's, or slot's again
     /// with None. Set every frame the outside shelf is up.
     pub fn set_outside(&mut self, outside: Option<Outside>) {
-        if outside.is_none() {
-            self.outside_text = None;
-        }
         self.outside = outside;
     }
 
@@ -606,6 +611,62 @@ impl App {
         self.outside_text = Some(text.to_string());
         self.shelf_named = None;
         self.name_pending = true;
+    }
+
+    /// Seats another frontend's game: slot then saves states, loads them,
+    /// browses them, autosaves and resumes it as one of its own carts,
+    /// through `snapshot`, keeping its states in `ring`. The game itself is
+    /// run and drawn by the other frontend.
+    pub fn seat_outside(&mut self, stem: String, ring: StateRing, snapshot: Box<dyn Snapshot>) {
+        self.outside_ring = Some(ring);
+        self.snapshot = Some(snapshot);
+        self.outside_eject = false;
+        self.pending = None;
+        self.polaroids = None;
+        self.autosave_at = self.now() + AUTOSAVE_MS;
+        self.phase = Phase::Playing { cart: stem };
+    }
+
+    /// Lets go of the outside game once it is out.
+    pub fn unseat_outside(&mut self) {
+        self.settle_saves();
+        self.snapshot = None;
+        self.outside_ring = None;
+        self.outside_eject = false;
+        self.pending = None;
+        self.polaroids = None;
+        self.phase = match std::mem::replace(&mut self.phase, Phase::Shelf) {
+            Phase::Doze { .. } => Phase::Doze { cart: None },
+            _ => Phase::Shelf,
+        };
+    }
+
+    pub fn outside_seated(&self) -> bool {
+        self.outside_ring.is_some()
+    }
+
+    /// Whether the outside game was asked to come out since last asked,
+    /// as slot's carts are by holding MENU.
+    pub fn take_outside_eject(&mut self) -> bool {
+        std::mem::take(&mut self.outside_eject)
+    }
+
+    /// Takes the outside game out as slot ejects a cart: its state is kept
+    /// to resume from if Save on Eject is on.
+    pub fn eject_outside(&mut self) {
+        let Phase::Playing { cart } = &self.phase else {
+            return;
+        };
+        let cart = cart.clone();
+        self.close_game_menu();
+        self.flush_eject(&cart);
+        self.pending = None;
+        self.outside_eject = true;
+    }
+
+    /// Whether a game taken out keeps its place to resume from.
+    pub fn eject_save(&self) -> bool {
+        self.state.eject_save
     }
 
     pub fn has_carts(&self) -> bool {
@@ -963,7 +1024,9 @@ impl App {
     }
 
     fn slot_owns_the_shoulders(&self) -> bool {
-        matches!(self.phase, Phase::Playing { .. }) && self.platform != Platform::Gba
+        matches!(self.phase, Phase::Playing { .. })
+            && self.platform != Platform::Gba
+            && !self.outside_seated()
     }
 
     pub fn taken_buttons(&self) -> &'static [Btn] {
@@ -1023,7 +1086,7 @@ impl App {
     }
 
     pub fn may_rewind(&self) -> bool {
-        self.state.rewind && !self.link_active()
+        self.state.rewind && !self.link_active() && !self.outside_seated()
     }
 
     pub fn turbo(&self) -> bool {
@@ -1046,7 +1109,7 @@ impl App {
     }
 
     pub fn may_fast_forward(&self) -> bool {
-        !self.link_active()
+        !self.link_active() && !self.outside_seated()
     }
 
     pub fn end_link(&mut self) {
@@ -1536,6 +1599,19 @@ impl App {
     fn adjust(&mut self, action: Action) -> bool {
         if action == Action::MuteToggle {
             self.mute_toggle();
+            return true;
+        }
+        // The screen shader, palettes and colour correction are slot's own
+        // picture's; an outside game draws its own.
+        let picture = matches!(
+            action,
+            Action::ShaderNext
+                | Action::ShaderPrev
+                | Action::PaletteNext
+                | Action::PalettePrev
+                | Action::ColourCorrectionToggle
+        );
+        if picture && self.outside_seated() {
             return true;
         }
         if let Action::ShaderNext | Action::ShaderPrev = action {
@@ -2082,22 +2158,7 @@ impl App {
                 faces: self.quick_menu_faces.as_ref(),
             }
             .draw(out),
-            Phase::Shelf if self.outside.is_some() => {
-                let outside = self.outside.as_ref().expect("checked above");
-                draw_backdrop(self.wallpaper, out);
-                out.extend_from_slice(&outside.row);
-                slot_ui::draw_slot_back(1.0, out);
-                out.extend_from_slice(&outside.seated);
-                slot_ui::draw_slot_front(1.0, out);
-                draw_slot_name(self.shelf_platform, self.slot_name_alpha(), out);
-                draw_footer(
-                    self.battery,
-                    self.battery_percent,
-                    self.bolt,
-                    self.shelf_clock,
-                    out,
-                );
-            }
+            Phase::Shelf if self.outside.is_some() => self.draw_outside(out),
             Phase::Shelf => {
                 draw_backdrop(self.wallpaper, out);
                 match (self.core_picker_shown(), self.selected_stem()) {
@@ -2140,6 +2201,9 @@ impl App {
                     .draw_row(Some(cart), 0.0, self.seat(), 1.0, out);
                 self.chrome(cart, self.seat(), out);
             }
+            // An outside game is drawn by its own frontend; its shelf shows
+            // here only while it asks, as for a disc change.
+            Phase::Playing { .. } if self.outside_seated() => self.draw_outside(out),
             Phase::Playing { cart } if self.screen < 1.0 => self.chrome(cart, 0.0, out),
             Phase::Playing { .. } => self.push_game(out),
             Phase::Polaroids { .. } => {
@@ -2193,8 +2257,28 @@ impl App {
         self.refusal.map_or(0.0, |r| r.offset(now))
     }
 
+    /// The outside shelf in slot's frame, in place of slot's carts.
+    fn draw_outside(&self, out: &mut Vec<Draw>) {
+        let Some(outside) = &self.outside else {
+            return;
+        };
+        draw_backdrop(self.wallpaper, out);
+        out.extend_from_slice(&outside.row);
+        slot_ui::draw_slot_back(1.0, out);
+        out.extend_from_slice(&outside.seated);
+        slot_ui::draw_slot_front(1.0, out);
+        draw_slot_name(self.shelf_platform, self.slot_name_alpha(), out);
+        draw_footer(
+            self.battery,
+            self.battery_percent,
+            self.bolt,
+            self.shelf_clock,
+            out,
+        );
+    }
+
     fn push_game(&self, out: &mut Vec<Draw>) {
-        if self.game_visible() {
+        if self.game_visible() && !self.outside_seated() {
             out.push(Draw::Game);
         }
     }
@@ -2577,6 +2661,9 @@ impl App {
     }
 
     fn eject(&mut self) {
+        if self.outside_seated() {
+            return self.eject_outside();
+        }
         if self.single_cart() {
             return self.refuse();
         }
@@ -2607,6 +2694,14 @@ impl App {
         };
         let (state, sav) = trusted_write(snapshot.as_ref(), state, "eject");
         let state = state.filter(|_| self.state.eject_save);
+        if let Some(ring) = &self.outside_ring {
+            if let Some(state) = state {
+                if let Err(e) = ring.write_resume(&state) {
+                    eprintln!("slot: eject: {e}");
+                }
+            }
+            return;
+        }
         match persist::eject(
             root,
             self.platform,
@@ -2806,6 +2901,9 @@ impl App {
     }
 
     fn game_menu_shortcut(&mut self) {
+        if self.outside_seated() {
+            return self.refuse();
+        }
         let Some(client_id) = self.link_client_id() else {
             return self.open_game_menu();
         };
@@ -3121,15 +3219,20 @@ impl App {
         let (state, sav) = trusted_write(snapshot.as_ref(), state, "autosave");
         let (root, platform, core, cart) =
             (root.clone(), self.platform, self.core, cart.to_owned());
+        let outside = self.outside_ring.clone();
         let write = move || {
-            if let Err(e) = persist::flush(
-                &root,
-                platform,
-                core,
-                &cart,
-                state.as_deref(),
-                sav.as_deref(),
-            ) {
+            let written = match outside {
+                Some(ring) => state.map_or(Ok(()), |s| ring.write_resume(&s)),
+                None => persist::flush(
+                    &root,
+                    platform,
+                    core,
+                    &cart,
+                    state.as_deref(),
+                    sav.as_deref(),
+                ),
+            };
+            if let Err(e) = written {
                 eprintln!("slot: autosave: {e}");
             }
         };
@@ -3154,6 +3257,14 @@ impl App {
             return;
         };
         let (state, sav) = trusted_write(snapshot.as_ref(), state, "flush");
+        if let Some(ring) = &self.outside_ring {
+            if let Some(state) = state {
+                if let Err(e) = ring.write_resume(&state) {
+                    eprintln!("slot: flush: {e}");
+                }
+            }
+            return;
+        }
         if let Err(e) = persist::flush(
             root,
             self.platform,
@@ -3167,6 +3278,9 @@ impl App {
     }
 
     fn ring(&self) -> Option<StateRing> {
+        if let Some(ring) = &self.outside_ring {
+            return Some(ring.clone());
+        }
         let (Some(root), Some(cart)) = (&self.root, self.seated()) else {
             return None;
         };

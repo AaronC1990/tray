@@ -18,11 +18,17 @@ pub struct StateEntry {
     pub thumb: PathBuf,
 }
 
+#[derive(Clone, Debug)]
 pub struct StateRing {
     dir: PathBuf,
 }
 
 impl StateRing {
+    /// A ring kept in `dir`, for a frontend other than slot's own.
+    pub fn at(dir: PathBuf) -> Self {
+        StateRing { dir }
+    }
+
     pub fn new(root: &Path, platform: Platform, core: Core, stem: &str) -> Self {
         StateRing {
             dir: root

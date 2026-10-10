@@ -17,7 +17,11 @@ fn a_plays_the_picked_disc() {
     let mut c = Carousel::new(row(6), 0);
     tap(&mut c, Btn::Right, 0);
     tap(&mut c, Btn::Right, 20);
-    assert_eq!(tap(&mut c, Btn::A, 40), Some(Pick::Play(2)));
+    c.handle(RawEvent::Down(Btn::A), 40);
+    assert_eq!(
+        c.handle(RawEvent::Up(Btn::A), 60),
+        Some(Pick::Play(2, false))
+    );
 }
 
 #[test]
@@ -81,6 +85,7 @@ fn up_and_down_jump_between_letters() {
 fn an_empty_shelf_plays_nothing() {
     let mut c = Carousel::new(row(0), 0);
     assert_eq!(tap(&mut c, Btn::A, 0), None);
+    assert_eq!(c.held_play(5000), None);
     tap(&mut c, Btn::Right, 20);
     assert!(c.placed(2.2).is_empty());
 }
@@ -131,4 +136,17 @@ fn wrapping_slides_the_short_way_round() {
         *d < 0.0 && *d > -1.0,
         "disc 7 should come in from the left: {d}"
     );
+}
+
+#[test]
+fn holding_a_starts_the_disc_fresh() {
+    let mut c = Carousel::new(row(4), 1);
+    c.handle(RawEvent::Down(Btn::A), 1000);
+    assert_eq!(
+        c.held_play(1200),
+        None,
+        "fresh before the hold was long enough"
+    );
+    assert_eq!(c.held_play(1500), Some(Pick::Play(1, true)));
+    assert_eq!(c.handle(RawEvent::Up(Btn::A), 1600), None, "played twice");
 }

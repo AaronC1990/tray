@@ -127,6 +127,23 @@ impl Compositor {
         self.sprites.draw(&items[from..], &self.quad);
     }
 
+    /// Draws `items`, laid out on the canvas, straight over whatever is on
+    /// the panel where the canvas would go, as overlays on a picture drawn
+    /// some other way.
+    pub fn draw_over(&mut self, items: &[Draw], window: (u32, u32)) {
+        let (x, y, w, h) = blit_rect(window, 0.0);
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            gl::Viewport(x, y, w, h);
+        }
+        let flat: Vec<Draw> = items
+            .iter()
+            .filter(|d| !matches!(d, Draw::Game | Draw::Shot { .. }))
+            .copied()
+            .collect();
+        self.sprites.draw(&flat, &self.quad);
+    }
+
     pub fn create_texture(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
         self.sprites.create_texture(w, h, rgba)
     }

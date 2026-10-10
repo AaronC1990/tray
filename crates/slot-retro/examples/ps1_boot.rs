@@ -47,6 +47,29 @@ fn main() {
         }
     }
     println!("audio samples over {last} frames: {audio}");
+    // PS1_STATE: save a state, play on, load it back and play on again,
+    // checking the frame after loading matches the frame after saving.
+    if std::env::var_os("PS1_STATE").is_some() {
+        let state = c.serialize().expect("serialize");
+        println!("state: {} bytes", state.len());
+        c.run_frame(ButtonMask::default());
+        let after_save = c.frame().0;
+        for _ in 0..120 {
+            c.run_frame(ButtonMask::default());
+        }
+        c.unserialize(&state).expect("unserialize");
+        println!("state loaded");
+        c.run_frame(ButtonMask::default());
+        let after_load = c.frame().0;
+        println!(
+            "frame after load matches frame after save: {}",
+            after_load == after_save
+        );
+        for _ in 0..120 {
+            c.run_frame(ButtonMask::default());
+        }
+        println!("played 120 frames after loading");
+    }
     let threads = std::fs::read_dir("/proc/self/task")
         .map(|d| d.count())
         .unwrap_or(0);

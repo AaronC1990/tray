@@ -82,6 +82,9 @@ pub struct Gestures {
     r2_refused: bool,
     r2_last_release: Option<Millis>,
     rewinding: bool,
+    /// L2 and R2 go to the game as plain buttons, for a game that has
+    /// them, rather than rewinding and fast-forwarding.
+    plain_triggers: bool,
 }
 
 fn ramp_due(down: Option<Millis>, last: Option<Millis>, now: Millis) -> bool {
@@ -97,6 +100,12 @@ fn ramp_due(down: Option<Millis>, last: Option<Millis>, now: Millis) -> bool {
 impl Gestures {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sends L2 and R2 to the game as plain buttons instead of rewinding
+    /// and fast-forwarding.
+    pub fn set_plain_triggers(&mut self, on: bool) {
+        self.plain_triggers = on;
     }
 
     pub fn ff_latched(&self) -> bool {
@@ -176,6 +185,11 @@ impl Gestures {
             }
             Btn::Lid => vec![Action::LidClose],
             Btn::VolUp | Btn::VolDown => self.volume_press(b, now),
+            Btn::L2 | Btn::R2 if self.plain_triggers => {
+                let mut out = self.hand_over_select(now);
+                out.push(Action::GbaDown(b));
+                out
+            }
             Btn::L2 => self.rewind_start(),
             Btn::R2 => self.ff_down(now),
             _ => {
@@ -199,6 +213,7 @@ impl Gestures {
             Btn::Power => self.power_up(),
             Btn::Lid => vec![Action::LidOpen],
             Btn::VolUp | Btn::VolDown => self.volume_release(b),
+            Btn::L2 | Btn::R2 if self.plain_triggers => vec![Action::GbaUp(b)],
             Btn::L2 => self.rewind_stop(),
             Btn::R2 => self.ff_up(now),
             _ => vec![Action::GbaUp(b)],

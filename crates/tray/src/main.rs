@@ -11,11 +11,12 @@ use slot::pacer::{Pacer, MIN_FRAME, STEP_TIMEOUT};
 use slot_gfx::{Compositor, Draw, FbdevSurface, Overlay, PicturePass, Surface};
 use slot_input::{Btn, InputSource, RawEvent};
 use slot_power::{trace_first_frame, DevicePlatform};
+use slot_retro::ButtonMask;
 use slot_store::initial;
 use tray::carousel::{Carousel, Pick};
 use tray::library::{scan, Game};
 use tray::motion::{Eject, Insert, Swap};
-use tray::play::{Ask, DiscGame, SAVES};
+use tray::play::{state_ring, Ask, Combos, DiscGame, SAVES};
 use tray::shelf::{Look, ShelfView};
 
 const CARD: &str = "/mnt/sdcard";
@@ -38,6 +39,8 @@ enum Mode {
     /// A disc going into the drive; the game loads once it is in.
     Inserting {
         which: usize,
+        /// Started fresh rather than resumed, from A held on the shelf.
+        fresh: bool,
         anim: Insert,
         /// Whether the seated disc has been on screen, so loading, which
         /// holds the screen still, starts with it showing.
@@ -60,6 +63,7 @@ struct Play {
     intro: f32,
     /// Seconds into dipping to black before quitting, once asked to quit.
     outro: Option<f32>,
+    combos: Combos,
 }
 
 /// A plain black veil over the whole panel.
@@ -91,6 +95,19 @@ fn slot_keeps_on_shelf(ev: &RawEvent) -> bool {
 /// power menu, its settings, or anything else but its shelf.
 fn slot_over(app: &App) -> bool {
     !matches!(app.phase(), Phase::Shelf) || app.power_menu().is_some()
+}
+
+/// Whether a disc game should wait: slot's state browser, sleep, or its
+/// power menu is up. slot holds a disc game as Playing while it runs.
+fn game_paused(app: &App) -> bool {
+    !matches!(app.phase(), Phase::Playing { .. }) || app.power_menu().is_some()
+}
+
+/// Whether slot's screen covers a disc game entirely, rather than drawing
+/// its overlays, such as the state browser, on top of it.
+fn game_hidden(app: &App) -> bool {
+    !matches!(app.phase(), Phase::Playing { .. } | Phase::Polaroids { .. })
+        || app.power_menu().is_some()
 }
 
 fn last_path(root: &Path) -> PathBuf {
@@ -186,24 +203,43 @@ fn main() {
     let mut last_tick = Instant::now();
     let mut drawn = false;
     loop {
-        let over = slot_over(frontend.app());
-        let carts = matches!(mode, Mode::Carts) || over;
+        let over = match &mode {
+            Mode::Playing(_) => game_paused(frontend.app()),
+            _ => slot_over(frontend.app()),
+        };
         if !matches!(mode, Mode::Playing(_)) {
             pacer.wait();
         }
         let began = Instant::now();
 
         let events = input.poll(frontend.now());
-        let (to_slot, mine): (Vec<RawEvent>, Vec<RawEvent>) = match (carts, &mode) {
-            (true, _) => (events, Vec::new()),
-            (false, Mode::Discs) => events.into_iter().partition(slot_keeps_on_shelf),
-            (false, _) => events.into_iter().partition(slot_keeps),
+        // A disc game's buttons go through slot, as a cart's do, so its
+        // save states, state browser and the rest work the same; only
+        // tray's own MENU combinations are kept back.
+        let mut asks = Vec::new();
+        let (to_slot, mine): (Vec<RawEvent>, Vec<RawEvent>) = match &mut mode {
+            Mode::Playing(play) => {
+                let mut to = Vec::new();
+                for ev in events {
+                    let (ask, forward) = play.combos.take(ev);
+                    asks.extend(ask);
+                    if forward {
+                        to.push(ev);
+                    }
+                }
+                (to, Vec::new())
+            }
+            Mode::Carts => (events, Vec::new()),
+            _ if over => (events, Vec::new()),
+            Mode::Discs => events.into_iter().partition(slot_keeps_on_shelf),
+            _ => events.into_iter().partition(slot_keeps),
         };
         frontend.advance_events(to_slot);
         if frontend.restarting() || frontend.powering_off() {
             // Finishing a game writes its memory card.
             match std::mem::replace(&mut mode, Mode::Discs) {
                 Mode::Playing(play) => {
+                    frontend.app_mut().unseat_outside();
                     play.game.finish(frontend.audio_sink());
                 }
                 Mode::Inserting {
@@ -231,23 +267,29 @@ fn main() {
             Mode::Carts => switch = frontend.app_mut().take_leave(),
             Mode::Discs => {
                 let ms = frontend.now();
-                for ev in mine {
-                    match carousel.handle(ev, ms) {
-                        Some(Pick::Play(i)) => {
+                let mut picks: Vec<Pick> = mine
+                    .into_iter()
+                    .filter_map(|ev| carousel.handle(ev, ms))
+                    .collect();
+                picks.extend(carousel.held_play(ms));
+                for pick in picks {
+                    match pick {
+                        Pick::Play(i, fresh) => {
                             write_last(&root, Some(&games[i]));
                             next = Some(Mode::Inserting {
                                 which: i,
+                                fresh,
                                 anim: Insert::start(),
                                 shown_shut: false,
                                 game: None,
                             });
                             break;
                         }
-                        Some(Pick::Switch(by)) if frontend.app().has_carts() => {
+                        Pick::Switch(by) if frontend.app().has_carts() => {
                             switch = Some(by);
                             break;
                         }
-                        Some(Pick::Letter(c)) => frontend.app_mut().say_in_slot(&c.to_string()),
+                        Pick::Letter(c) => frontend.app_mut().say_in_slot(&c.to_string()),
                         _ => {}
                     }
                 }
@@ -256,6 +298,7 @@ fn main() {
             }
             Mode::Inserting {
                 which,
+                fresh,
                 anim,
                 shown_shut,
                 game,
@@ -265,8 +308,19 @@ fn main() {
                 }
                 if anim.ready_to_load() {
                     if *shown_shut {
-                        match DiscGame::start(&root, &games[*which], frontend.audio_sink(), period)
-                        {
+                        // Resume where it was left, as slot resumes a cart,
+                        // unless started fresh or Save on Eject is off.
+                        let resume = (!*fresh && frontend.app().eject_save())
+                            .then(|| state_ring(&root, &games[*which].stem).read_resume())
+                            .and_then(|r| r.ok().flatten());
+                        let started = DiscGame::start(
+                            &root,
+                            &games[*which],
+                            frontend.audio_sink(),
+                            period,
+                            resume,
+                        );
+                        match started {
                             Ok(g) => {
                                 *game = Some(Box::new(g));
                                 anim.loaded();
@@ -287,12 +341,20 @@ fn main() {
                 }
                 if anim.done() {
                     if let Some(game) = game.take() {
+                        // slot takes the game as one of its own from here,
+                        // for save states, the state browser and resuming.
+                        let stem = games[*which].stem.clone();
+                        let ring = state_ring(&root, &stem);
+                        frontend.app_mut().seat_outside(stem, ring, game.snapshot());
+                        frontend.set_plain_triggers(true);
+                        frontend.take_input_back();
                         next = Some(Mode::Playing(Box::new(Play {
                             game,
                             which: *which,
                             swap: None,
                             intro: 0.0,
                             outro: None,
+                            combos: Combos::default(),
                         })));
                     }
                 }
@@ -304,40 +366,39 @@ fn main() {
                     swap,
                     intro,
                     outro,
+                    ..
                 } = play.as_mut();
-                // A disc change or quitting takes the buttons until done.
-                let ask = match (swap.is_some(), outro.is_some()) {
-                    (false, false) => mine.into_iter().find_map(|ev| game.handle(ev)),
-                    _ => None,
-                };
-                match ask {
-                    Some(Ask::Quit) => {
-                        game.release_all();
-                        *outro = Some(0.0);
-                    }
-                    Some(Ask::Disc(by)) => {
-                        let (from, count) = (game.disc(), game.disc_count());
-                        let to = from as i64 + by as i64;
-                        if count > 1 && (0..count as i64).contains(&to) {
-                            game.release_all();
-                            let s = Swap::start(
-                                &mut view,
-                                &mut compositor,
-                                &labels,
-                                &games[*which],
-                                from,
-                                to as u32,
-                            );
-                            frontend.app_mut().say_in_slot(&s.caption());
-                            *swap = Some(s);
+                // A disc change or quitting takes the combinations until done.
+                let busy = swap.is_some() || outro.is_some();
+                for ask in asks.into_iter().filter(|_| !busy) {
+                    match ask {
+                        // Out as slot ejects a cart, keeping its place.
+                        Ask::Quit => frontend.app_mut().eject_outside(),
+                        Ask::Disc(by) => {
+                            let (from, count) = (game.disc(), game.disc_count());
+                            let to = from as i64 + by as i64;
+                            if count > 1 && (0..count as i64).contains(&to) {
+                                let s = Swap::start(
+                                    &mut view,
+                                    &mut compositor,
+                                    &labels,
+                                    &games[*which],
+                                    from,
+                                    to as u32,
+                                );
+                                frontend.app_mut().say_in_slot(&s.caption());
+                                *swap = Some(s);
+                            }
                         }
                     }
-                    None => {}
+                }
+                // Holding MENU ejects, as for a cart, as does MENU + START.
+                if frontend.app_mut().take_outside_eject() && outro.is_none() {
+                    *outro = Some(0.0);
                 }
                 if over {
                     // The game waits, silent, while slot's screen is up,
                     // with its card written in case the power goes next.
-                    game.release_all();
                     game.save_card();
                 } else if let Some(t) = outro {
                     *t += dt;
@@ -348,7 +409,11 @@ fn main() {
                     }
                 } else {
                     *intro += dt;
-                    game.frame(&mut picture, frontend.app().output_volume());
+                    let pad = match swap {
+                        Some(_) => ButtonMask(0),
+                        None => frontend.game_pad(),
+                    };
+                    game.frame(&mut picture, frontend.app().output_volume(), pad);
                     if let Some(s) = swap {
                         sound = s.tick(dt, game);
                         if s.done() {
@@ -369,6 +434,10 @@ fn main() {
         if let Some(to) = next {
             match std::mem::replace(&mut mode, to) {
                 Mode::Playing(play) => {
+                    // slot lets go of the game before it is unloaded.
+                    frontend.app_mut().unseat_outside();
+                    frontend.set_plain_triggers(false);
+                    frontend.take_input_back();
                     period = play.game.finish(frontend.audio_sink()).or(period);
                     last_tick = Instant::now();
                 }
@@ -422,15 +491,19 @@ fn main() {
             }
         });
         let shelf_up = outside.is_some();
-        match (&mode, outside) {
-            (Mode::Carts, _) => frontend.app_mut().set_outside(None),
-            (_, Some(o)) => frontend.app_mut().set_outside(Some(o)),
-            _ => {}
-        }
-        let game_up = matches!(mode, Mode::Playing(_)) && !shelf_up;
-        match game_up && !slot_over(frontend.app()) {
-            true => picture.draw(panel),
-            false => frontend.render(&mut compositor, panel),
+        frontend.app_mut().set_outside(outside);
+        let playing = matches!(mode, Mode::Playing(_));
+        let covered = match playing {
+            true => shelf_up || game_hidden(frontend.app()),
+            false => true,
+        };
+        match covered {
+            true => frontend.render(&mut compositor, panel),
+            // The game, with slot's toasts, volume and state browser on it.
+            false => {
+                picture.draw(panel);
+                frontend.render_over(&mut compositor, panel);
+            }
         }
         let dark = match &mode {
             Mode::Carts | Mode::Discs => 0.0,
@@ -445,7 +518,11 @@ fn main() {
                 swap.max(ends)
             }
         };
-        if dark > 0.0 && !slot_over(frontend.app()) {
+        let slot_up = match playing {
+            true => game_hidden(frontend.app()),
+            false => slot_over(frontend.app()),
+        };
+        if dark > 0.0 && !slot_up {
             overlay.draw_over(&[veil(panel, dark)]);
         }
 

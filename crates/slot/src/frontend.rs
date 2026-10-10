@@ -349,6 +349,26 @@ impl Frontend {
         compositor.end_frame(window);
     }
 
+    /// Draws slot's overlays, such as its toasts, volume and the state
+    /// browser, over a game another player has already put on the panel.
+    pub fn render_over(&mut self, compositor: &mut Compositor, window: (u32, u32)) {
+        compositor.fit(window);
+        self.sync_faces(compositor);
+        self.draws.clear();
+        self.session.app().draw(&mut self.draws);
+        compositor.draw_over(&self.draws, window);
+    }
+
+    /// Sends L2 and R2 to the game as buttons, for a game that has them.
+    pub fn set_plain_triggers(&mut self, on: bool) {
+        self.session.set_plain_triggers(on);
+    }
+
+    /// The buttons the game is being given, after slot has taken its own.
+    pub fn game_pad(&self) -> slot_retro::ButtonMask {
+        self.session.game_pad()
+    }
+
     pub fn compose(&mut self, compositor: &mut Compositor) {
         compositor.set_blue_light(self.session.app().blue_light());
         compositor.set_picture(self.session.app().picture_rect());
@@ -374,6 +394,14 @@ impl Frontend {
             compositor.upload_game(&frame);
             crate::latency::taken();
         }
+        self.sync_faces(compositor);
+        self.draws.clear();
+        self.session.app().draw(&mut self.draws);
+        compositor.draw_list(&self.draws);
+    }
+
+    /// Makes the faces slot's screens need, as their contents change.
+    fn sync_faces(&mut self, compositor: &mut Compositor) {
         self.cart_faces.sync(self.session.app_mut(), compositor);
         sync_clock(self.session.app_mut(), compositor, &mut self.clocks);
         sync_about(self.session.app_mut(), compositor, &mut self.about);
@@ -427,9 +455,6 @@ impl Frontend {
             },
             &mut self.switcher,
         );
-        self.draws.clear();
-        self.session.app().draw(&mut self.draws);
-        compositor.draw_list(&self.draws);
     }
 
     pub fn drive_emulator(&mut self) {

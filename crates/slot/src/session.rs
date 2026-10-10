@@ -29,6 +29,7 @@ pub struct Session {
     pulse: Option<(Millis, u16)>,
     reloading: bool,
     driven: bool,
+    plain_triggers: bool,
 }
 
 impl Session {
@@ -50,6 +51,7 @@ impl Session {
             pulse: None,
             reloading: false,
             driven: false,
+            plain_triggers: false,
         }
     }
 
@@ -78,8 +80,20 @@ impl Session {
     /// something that had them.
     pub fn release_input(&mut self) {
         self.gestures = Gestures::new();
+        self.gestures.set_plain_triggers(self.plain_triggers);
         self.pad.clear();
         self.sync_pad();
+    }
+
+    /// Sends L2 and R2 to the game as buttons, for a game that has them.
+    pub fn set_plain_triggers(&mut self, on: bool) {
+        self.plain_triggers = on;
+        self.gestures.set_plain_triggers(on);
+    }
+
+    /// The buttons the game is being given, after slot has taken its own.
+    pub fn game_pad(&self) -> slot_retro::ButtonMask {
+        self.pad.mask()
     }
 
     pub fn audio_ring(&self) -> std::sync::Arc<Ring> {
