@@ -33,9 +33,9 @@ fn main() {
         // One tick of this length moves the row `slide` of the way.
         c.tick(1006, -(1.0 - slide).ln() / 14.0);
     }
-    view.draw(&mut overlay, &games, &c);
+    view.draw(&mut overlay, &games, &c, &tray::shelf::Look::default());
     view.tick(0.7, Some(c.selected()));
-    view.draw(&mut overlay, &games, &c);
+    view.draw(&mut overlay, &games, &c, &tray::shelf::Look::default());
     // SLIDE=<dx>: as tray shows the shelf sliding off over another screen,
     // here a plain red one.
     if let Some(dx) = std::env::var("SLIDE")

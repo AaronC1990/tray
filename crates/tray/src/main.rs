@@ -13,9 +13,9 @@ use slot_input::{Btn, InputSource, RawEvent};
 use slot_power::{trace_first_frame, DevicePlatform};
 use tray::carousel::{Carousel, Pick};
 use tray::library::{scan, Game};
+use tray::motion::{Eject, Insert, Swap};
 use tray::play::{Ask, DiscGame, SAVES};
-use tray::shelf::ShelfView;
-use tray::swap::{Swap, SwapView};
+use tray::shelf::{Look, ShelfView};
 
 const CARD: &str = "/mnt/sdcard";
 const GAMES: &str = "Games/PS";
@@ -25,12 +25,51 @@ const LAST: &str = ".tray-last";
 /// How long one screen takes to slide off and uncover the next.
 const SLIDE: Duration = Duration::from_millis(280);
 
+/// How long a game takes to dip to black before its disc comes out, and to
+/// come up out of black once it has gone in.
+const OUTRO: f32 = 0.15;
+const INTRO: f32 = 0.25;
+
 enum Mode {
     /// slot's shelves and games.
     Carts,
     Discs,
-    /// A disc game, and which game on the shelf it is.
-    Playing(Box<DiscGame>, usize),
+    /// A disc going into the drive; the game loads once it is in.
+    Inserting {
+        which: usize,
+        anim: Insert,
+        /// Whether the seated disc has been on screen, so loading, which
+        /// holds the screen still, starts with it showing.
+        shown_shut: bool,
+        game: Option<Box<DiscGame>>,
+    },
+    Playing(Box<Play>),
+    /// A disc coming back out to the shelf.
+    Ejecting {
+        anim: Eject,
+    },
+}
+
+struct Play {
+    game: Box<DiscGame>,
+    /// Which game on the shelf it is.
+    which: usize,
+    swap: Option<Swap>,
+    /// Seconds since the game came up.
+    intro: f32,
+    /// Seconds into dipping to black before quitting, once asked to quit.
+    outro: Option<f32>,
+}
+
+/// A plain black veil over the whole panel.
+fn veil(panel: (u32, u32), alpha: f32) -> Draw {
+    Draw::Rect {
+        x: 0.0,
+        y: 0.0,
+        w: panel.0 as f32,
+        h: panel.1 as f32,
+        colour: [0.0, 0.0, 0.0, alpha.clamp(0.0, 1.0)],
+    }
 }
 
 struct Slide {
@@ -113,8 +152,6 @@ fn main() {
     };
     let labels = root.join(LABELS);
     let mut view = ShelfView::new(&mut overlay, panel, &labels);
-    let mut swap_view = SwapView::new(&mut overlay, panel);
-    let mut swap: Option<Swap> = None;
     let initials = games
         .iter()
         .map(|g| slot_store::initial(&g.title))
@@ -150,7 +187,7 @@ fn main() {
     loop {
         let over = slot_over(frontend.app());
         let carts = matches!(mode, Mode::Carts) || over;
-        if !matches!(mode, Mode::Playing(..)) {
+        if !matches!(mode, Mode::Playing(_)) {
             pacer.wait();
         }
         let began = Instant::now();
@@ -163,8 +200,16 @@ fn main() {
         frontend.advance_events(to_slot);
         if frontend.restarting() || frontend.powering_off() {
             // Finishing a game writes its memory card.
-            if let Mode::Playing(game, _) = std::mem::replace(&mut mode, Mode::Discs) {
-                game.finish(frontend.audio_sink());
+            match std::mem::replace(&mut mode, Mode::Discs) {
+                Mode::Playing(play) => {
+                    play.game.finish(frontend.audio_sink());
+                }
+                Mode::Inserting {
+                    game: Some(game), ..
+                } => {
+                    game.finish(frontend.audio_sink());
+                }
+                _ => {}
             }
             if frontend.restarting() {
                 frontend.restart();
@@ -187,10 +232,12 @@ fn main() {
                     match carousel.handle(ev, ms) {
                         Some(Pick::Play(i)) => {
                             write_last(&root, Some(&games[i]));
-                            match DiscGame::start(&root, &games[i], frontend.audio_sink(), period) {
-                                Ok(game) => next = Some(Mode::Playing(Box::new(game), i)),
-                                Err(e) => eprintln!("tray: {}: {e}", games[i].path.display()),
-                            }
+                            next = Some(Mode::Inserting {
+                                which: i,
+                                anim: Insert::start(&view),
+                                shown_shut: false,
+                                game: None,
+                            });
                             break;
                         }
                         Some(Pick::Switch(by)) if frontend.app().has_carts() => {
@@ -203,53 +250,124 @@ fn main() {
                 carousel.tick(frontend.now(), dt);
                 view.tick(dt, (!games.is_empty()).then(|| carousel.selected()));
             }
-            Mode::Playing(game, which) => {
-                // A disc change takes the buttons until it is done.
-                let ask = match swap {
-                    Some(_) => None,
-                    None => mine.into_iter().find_map(|ev| game.handle(ev)),
+            Mode::Inserting {
+                which,
+                anim,
+                shown_shut,
+                game,
+            } => {
+                if !over {
+                    anim.tick(dt);
+                }
+                if anim.ready_to_load() {
+                    if *shown_shut {
+                        match DiscGame::start(&root, &games[*which], frontend.audio_sink(), period)
+                        {
+                            Ok(g) => {
+                                *game = Some(Box::new(g));
+                                anim.loaded();
+                            }
+                            Err(e) => {
+                                eprintln!("tray: {}: {e}", games[*which].path.display());
+                                next = Some(Mode::Ejecting {
+                                    anim: Eject::start(&view),
+                                });
+                            }
+                        }
+                        // Loading held the screen; don't count it as time
+                        // the animation should catch up on.
+                        last_tick = Instant::now();
+                    } else {
+                        *shown_shut = true;
+                    }
+                }
+                if anim.done() {
+                    if let Some(game) = game.take() {
+                        next = Some(Mode::Playing(Box::new(Play {
+                            game,
+                            which: *which,
+                            swap: None,
+                            intro: 0.0,
+                            outro: None,
+                        })));
+                    }
+                }
+            }
+            Mode::Playing(play) => {
+                let Play {
+                    game,
+                    which,
+                    swap,
+                    intro,
+                    outro,
+                } = play.as_mut();
+                // A disc change or quitting takes the buttons until done.
+                let ask = match (swap.is_some(), outro.is_some()) {
+                    (false, false) => mine.into_iter().find_map(|ev| game.handle(ev)),
+                    _ => None,
                 };
                 match ask {
-                    Some(Ask::Quit) => next = Some(Mode::Discs),
+                    Some(Ask::Quit) => {
+                        game.release_all();
+                        *outro = Some(0.0);
+                    }
                     Some(Ask::Disc(by)) => {
                         let (from, count) = (game.disc(), game.disc_count());
                         let to = from as i64 + by as i64;
                         if count > 1 && (0..count as i64).contains(&to) {
                             game.release_all();
-                            swap = Some(Swap::start(
-                                &mut swap_view,
+                            *swap = Some(Swap::start(
+                                &mut view,
                                 &mut overlay,
                                 &labels,
                                 &games[*which],
                                 from,
                                 to as u32,
                                 count,
+                                panel.0 as f32,
                             ));
                         }
                     }
                     None => {}
                 }
-                if next.is_some() {
-                } else if over {
+                if over {
                     // The game waits, silent, while slot's screen is up,
                     // with its card written in case the power goes next.
                     game.release_all();
                     game.save_card();
+                } else if let Some(t) = outro {
+                    *t += dt;
+                    if *t >= OUTRO {
+                        next = Some(Mode::Ejecting {
+                            anim: Eject::start(&view),
+                        });
+                    }
                 } else {
+                    *intro += dt;
                     game.frame(&mut picture, frontend.app().output_volume());
                     if swap.as_mut().is_some_and(|s| s.tick(dt, game)) {
-                        swap = None;
+                        *swap = None;
                     }
+                }
+            }
+            Mode::Ejecting { anim } => {
+                if !over {
+                    anim.tick(dt);
+                }
+                if anim.done() {
+                    next = Some(Mode::Discs);
                 }
             }
         }
         if let Some(to) = next {
-            if let Mode::Playing(game, _) = std::mem::replace(&mut mode, to) {
-                swap = None;
-                period = game.finish(frontend.audio_sink()).or(period);
-                carousel.release_all();
+            match std::mem::replace(&mut mode, to) {
+                Mode::Playing(play) => {
+                    period = play.game.finish(frontend.audio_sink()).or(period);
+                    last_tick = Instant::now();
+                }
+                Mode::Ejecting { .. } => carousel.release_all(),
+                _ => {}
             }
-            last_tick = Instant::now();
         }
         if matches!(mode, Mode::Carts) {
             frontend.step_emulator(pacer.period, STEP_TIMEOUT);
@@ -262,11 +380,44 @@ fn main() {
                     view: &mut ShelfView,
                     picture: &PicturePass,
                     carousel: &Carousel| {
-            match mode {
-                _ if slot_over(frontend.app()) => frontend.render(compositor, panel),
-                Mode::Carts => frontend.render(compositor, panel),
-                Mode::Discs => view.draw(overlay, &games, carousel),
-                Mode::Playing(..) => picture.draw(panel),
+            if slot_over(frontend.app()) {
+                return frontend.render(compositor, panel);
+            }
+            let shelf = |view: &mut ShelfView, overlay: &mut Overlay, look: &Look| {
+                view.draw(overlay, &games, carousel, look)
+            };
+            let dark = match mode {
+                Mode::Carts => {
+                    frontend.render(compositor, panel);
+                    0.0
+                }
+                Mode::Discs => {
+                    shelf(view, overlay, &Look::default());
+                    0.0
+                }
+                Mode::Inserting { anim, .. } => {
+                    shelf(view, overlay, &anim.look());
+                    anim.veil()
+                }
+                Mode::Ejecting { anim, .. } => {
+                    shelf(view, overlay, &anim.look());
+                    anim.veil()
+                }
+                Mode::Playing(play) => {
+                    match &play.swap {
+                        Some(s) if s.shows_shelf() => shelf(view, overlay, &s.look()),
+                        _ => picture.draw(panel),
+                    }
+                    let swap = play.swap.as_ref().map_or(0.0, Swap::veil);
+                    let ends = match play.outro {
+                        Some(t) => t / OUTRO,
+                        None => 1.0 - play.intro / INTRO,
+                    };
+                    swap.max(ends)
+                }
+            };
+            if dark > 0.0 {
+                overlay.draw_over(&[veil(panel, dark)]);
             }
         };
         draw(
@@ -278,11 +429,6 @@ fn main() {
             &picture,
             &carousel,
         );
-        if let (Mode::Playing(..), Some(s)) = (&mode, &swap) {
-            if !slot_over(frontend.app()) {
-                s.draw(&swap_view, &overlay);
-            }
-        }
         if let Some(by) = switch {
             // Keep the screen being left, cross to the other system, and
             // slide the old screen away over it.
@@ -321,28 +467,22 @@ fn main() {
             } else {
                 let eased = 1.0 - (1.0 - t).powi(3);
                 let dx = (s.dir * eased * panel.0 as f32).round();
-                let mut items = vec![Draw::Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: panel.0 as f32,
-                    h: panel.1 as f32,
-                    colour: [0.0, 0.0, 0.0, 0.45 * (1.0 - eased)],
-                }];
+                let mut items = vec![veil(panel, 0.45 * (1.0 - eased))];
                 items.extend(overlay.snapshot_draw(dx, 1.0));
                 overlay.draw_over(&items);
             }
         }
 
-        let swap = Instant::now();
-        let work = swap - began;
+        let swap_at = Instant::now();
+        let work = swap_at - began;
         if let Err(e) = surface.swap() {
             fail(format!("tray: swap: {e}"));
         }
-        let swap_took = swap.elapsed();
+        let swap_took = swap_at.elapsed();
         pacer.swapped(work, swap_took > Duration::from_millis(1));
-        if let Mode::Playing(game, _) = &mut mode {
-            if !over {
-                game.swapped(swap_took);
+        if let Mode::Playing(play) = &mut mode {
+            if !over && play.outro.is_none() {
+                play.game.swapped(swap_took);
             }
         }
         if !drawn {
