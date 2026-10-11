@@ -2711,8 +2711,10 @@ impl App {
     }
 
     fn eject(&mut self) {
+        // An outside game has its own way out, so holding MENU is free
+        // for its own combinations, such as MENU + L2 to rewind.
         if self.outside_seated() {
-            return self.eject_outside();
+            return;
         }
         if self.single_cart() {
             return self.refuse();

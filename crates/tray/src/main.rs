@@ -450,7 +450,7 @@ fn main() {
                     write_look(&root, look);
                     frontend.app_mut().say(look_toast(look));
                 }
-                // Holding MENU ejects, as for a cart, as does MENU + START.
+                // START + SELECT asked the game out.
                 if frontend.app_mut().take_outside_eject() && outro.is_none() {
                     *outro = Some(0.0);
                 }

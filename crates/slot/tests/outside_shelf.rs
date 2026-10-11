@@ -111,7 +111,7 @@ fn the_outside_shelf_is_drawn_in_slots_frame_and_named_in_the_slot() {
 }
 
 #[test]
-fn an_outside_game_saves_loads_and_ejects_as_a_cart_does() {
+fn an_outside_game_saves_loads_and_comes_out_when_asked() {
     use common::StubSnapshot;
     use slot_store::StateRing;
     let (d, mut a) = gba_and_gb();
@@ -141,11 +141,15 @@ fn an_outside_game_saves_loads_and_ejects_as_a_cart_does() {
     a.apply(Action::GbaDown(Btn::B));
     assert!(matches!(a.phase(), Phase::Playing { .. }));
 
+    // Holding MENU is left to the outside game's own combinations; it
+    // comes out when its frontend asks.
     a.apply(Action::Eject);
     assert!(
-        a.take_outside_eject(),
-        "holding MENU did not ask the game out"
+        !a.take_outside_eject(),
+        "holding MENU ejected an outside game"
     );
+    a.eject_outside();
+    assert!(a.take_outside_eject(), "the game was not let out");
     assert!(!a.take_outside_eject(), "an eject is taken once");
     assert!(
         ring.read_resume().unwrap().is_some(),

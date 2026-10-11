@@ -133,12 +133,14 @@ pub enum Ask {
     RewindStop,
 }
 
-/// MENU with START to quit, with L or R to change discs, with R2 to
-/// fast-forward and held with L2 to rewind. The buttons
+/// START with SELECT to quit, and MENU with L or R to change discs, with
+/// R2 to fast-forward and held with L2 to rewind. The buttons
 /// pressed with MENU are kept from slot and the game.
 #[derive(Default)]
 pub struct Combos {
     menu: bool,
+    start: bool,
+    select: bool,
     /// Buttons pressed as part of a combination, whose release is kept too.
     held: Vec<Btn>,
 }
@@ -146,29 +148,38 @@ pub struct Combos {
 impl Combos {
     /// What `ev` asks for, and whether it should still go on to slot.
     pub fn take(&mut self, ev: RawEvent) -> (Option<Ask>, bool) {
-        let ask = match ev {
-            RawEvent::Down(Btn::Menu) => {
-                self.menu = true;
-                None
+        let (down, b) = match ev {
+            RawEvent::Down(b) => (true, b),
+            RawEvent::Up(b) => (false, b),
+        };
+        // What each held button means is decided against the others as
+        // they were before this one changed.
+        let (menu, start, select) = (self.menu, self.start, self.select);
+        match b {
+            Btn::Menu => self.menu = down,
+            Btn::Start => self.start = down,
+            Btn::Select => self.select = down,
+            _ => {}
+        }
+        if !down {
+            if !self.held.contains(&b) {
+                return (None, true);
             }
-            RawEvent::Up(Btn::Menu) => {
-                self.menu = false;
-                None
-            }
-            RawEvent::Down(b @ Btn::Start) if self.menu => Some((b, Ask::Quit)),
-            RawEvent::Down(b @ Btn::R1) if self.menu => Some((b, Ask::Disc(1))),
-            RawEvent::Down(b @ Btn::L1) if self.menu => Some((b, Ask::Disc(-1))),
-            RawEvent::Down(b @ Btn::R2) if self.menu => Some((b, Ask::FastForward)),
-            RawEvent::Down(b @ Btn::L2) if self.menu => Some((b, Ask::RewindStart)),
-            RawEvent::Up(b) if self.held.contains(&b) => {
-                self.held.retain(|h| *h != b);
-                let ask = (b == Btn::L2).then_some(Ask::RewindStop);
-                return (ask, false);
-            }
+            self.held.retain(|h| *h != b);
+            return ((b == Btn::L2).then_some(Ask::RewindStop), false);
+        }
+        let ask = match b {
+            // START and SELECT together quit, pressed in either order.
+            Btn::Start if select => Some(Ask::Quit),
+            Btn::Select if start => Some(Ask::Quit),
+            Btn::R1 if menu => Some(Ask::Disc(1)),
+            Btn::L1 if menu => Some(Ask::Disc(-1)),
+            Btn::R2 if menu => Some(Ask::FastForward),
+            Btn::L2 if menu => Some(Ask::RewindStart),
             _ => None,
         };
         match ask {
-            Some((b, ask)) => {
+            Some(ask) => {
                 self.held.push(b);
                 (Some(ask), false)
             }
