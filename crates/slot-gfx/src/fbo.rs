@@ -28,6 +28,9 @@ pub struct Compositor {
     bezel: Option<gl::types::GLuint>,
     gb_bezel: Option<gl::types::GLuint>,
     use_gb_bezel: bool,
+    light: crate::light::LightPass,
+    /// The light in the Game Boy bezel, lit while that bezel shows.
+    gb_light: Option<crate::light::BezelLight>,
 }
 
 impl Compositor {
@@ -94,6 +97,8 @@ impl Compositor {
                 bezel: None,
                 gb_bezel: None,
                 use_gb_bezel: false,
+                light: crate::light::LightPass::new()?,
+                gb_light: None,
             })
         }
     }
@@ -274,6 +279,11 @@ impl Compositor {
         }
     }
 
+    /// Lights the Game Boy bezel's light as given, or leaves it dark.
+    pub fn set_gb_light(&mut self, light: Option<crate::light::BezelLight>) {
+        self.gb_light = light;
+    }
+
     pub fn use_gb_bezel(&mut self, on: bool) {
         self.use_gb_bezel = on;
     }
@@ -348,6 +358,11 @@ impl Compositor {
         }
         self.quad.draw();
         unsafe { gl::Disable(gl::BLEND) };
+        let gb_shown = self.use_gb_bezel && self.gb_bezel.is_some();
+        if let (true, Some(light)) = (gb_shown, &self.gb_light) {
+            self.light
+                .draw(light, window, drop, self.gain, alpha, &self.quad);
+        }
     }
 }
 

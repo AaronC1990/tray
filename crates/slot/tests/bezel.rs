@@ -66,3 +66,40 @@ fn the_shipped_game_boy_bezel_leaves_exactly_the_3x_picture_open() {
         );
     }
 }
+
+#[test]
+fn the_power_light_is_green_full_amber_middling_and_red_low() {
+    use slot::bezel::light_colour;
+    let green = light_colour(Some(100));
+    assert_eq!(light_colour(Some(70)), green);
+    let amber = light_colour(Some(69));
+    assert_ne!(amber, green);
+    assert_eq!(light_colour(Some(30)), amber);
+    let red = light_colour(Some(29));
+    assert_ne!(red, amber);
+    assert_eq!(light_colour(Some(0)), red);
+    assert_eq!(light_colour(None), green, "an unknown battery");
+}
+
+#[test]
+fn the_power_light_sits_where_the_file_beside_the_bezel_says() {
+    use slot::bezel::light_of;
+    let d = tempfile::tempdir().unwrap();
+    let bezel = d.path().join("640x480.png");
+    std::fs::write(&bezel, b"").unwrap();
+    assert_eq!(light_of(&bezel, (640, 480)), None, "a light with no file");
+    std::fs::write(d.path().join("640x480.light"), "40 132 4.0\n").unwrap();
+    assert_eq!(light_of(&bezel, (640, 480)), Some((40.0, 132.0, 4.0)));
+    assert_eq!(
+        light_of(&bezel, (1280, 960)),
+        Some((80.0, 264.0, 8.0)),
+        "not scaled with the bezel"
+    );
+}
+
+#[test]
+fn the_shipped_game_boy_bezel_has_its_light() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bezel = repo.join("card/System/bezels/gb/640x480.png");
+    assert!(slot::bezel::light_of(&bezel, (640, 480)).is_some());
+}

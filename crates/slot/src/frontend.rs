@@ -50,6 +50,9 @@ pub struct Frontend {
     core_built: Option<String>,
     undo_tex: Option<TexId>,
     switcher: Switcher,
+    /// Where the Game Boy bezel's power light sits on the panel, and its
+    /// radius, from the file beside the bezel, if it has one.
+    gb_light: Option<(f32, f32, f32)>,
     clocks: Clocks,
     about: AboutFace,
     quick_clock: QuickClock,
@@ -127,6 +130,7 @@ impl Frontend {
             core_built: None,
             undo_tex: None,
             switcher: Switcher::default(),
+            gb_light: None,
             clocks: Clocks::default(),
             about: AboutFace::default(),
             quick_clock: QuickClock::default(),
@@ -340,6 +344,7 @@ impl Frontend {
                 compositor.set_gb_bezel(panel.0, panel.1, &rgba);
                 eprintln!("slot: game boy bezel {}", path.display());
             }
+            self.gb_light = crate::bezel::light_of(&path, panel);
         }
     }
 
@@ -396,6 +401,11 @@ impl Frontend {
         compositor.set_game_source_rect(self.session.app().source_rect());
         compositor.set_game_fit(self.session.app().game_fit());
         compositor.use_gb_bezel(self.session.app().frames_game_boy_sides());
+        compositor.set_gb_light(self.gb_light.map(|(x, y, radius)| slot_gfx::BezelLight {
+            at: (x, y),
+            radius,
+            rgb: crate::bezel::light_colour(self.session.app().battery().map(|b| b.percent)),
+        }));
         compositor.begin_frame();
         if self.draw_rebuild(compositor) {
             return;

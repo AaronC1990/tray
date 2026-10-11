@@ -1,8 +1,13 @@
 """Builds System/bezels/gb/640x480.png from the RG35XXSP bezel: black side
 panels beside a 3x Game Boy picture, the original's edge shadow along the
-picture's sides, and a power LED with its label on the left panel."""
+picture's sides, and a power LED with its label on the left panel.
+
+The LED is drawn unlit, a dark lens in its rim. slot lights it, coloured
+by the battery, from System/bezels/gb/640x480.light beside the image,
+which this writes too: the lens's middle and radius in the image's
+pixels."""
 import sys
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 base_path, font_path, out_path = sys.argv[1:4]
 base = Image.open(base_path).convert('RGBA')
@@ -23,21 +28,17 @@ for y in range(H):
             a = max(a, RAMP[d])
         px[x, y] = (r, g, bb, a)
 
-# The power LED, drawn at 4x and shrunk so its edge and glow are smooth.
+# The power LED, drawn at 4x and shrunk so its edge is smooth: a rim and
+# an unlit lens, which slot lights.
 K = 4
 cx, cy = 40, 132
 layer = Image.new('RGBA', (LEFT * K, 200 * K), (0, 0, 0, 0))
-glow = Image.new('RGBA', layer.size, (0, 0, 0, 0))
-ImageDraw.Draw(glow).ellipse(
-    ((cx - 9) * K, (cy - 9) * K, (cx + 9) * K, (cy + 9) * K), fill=(255, 40, 30, 110))
-glow = glow.filter(ImageFilter.GaussianBlur(5 * K))
-layer.alpha_composite(glow)
 d = ImageDraw.Draw(layer)
 rim, lit = 5.0, 4.0
-d.ellipse(((cx - rim) * K, (cy - rim) * K, (cx + rim) * K, (cy + rim) * K), fill=(40, 6, 6, 255))
-d.ellipse(((cx - lit) * K, (cy - lit) * K, (cx + lit) * K, (cy + lit) * K), fill=(235, 30, 24, 255))
+d.ellipse(((cx - rim) * K, (cy - rim) * K, (cx + rim) * K, (cy + rim) * K), fill=(26, 26, 30, 255))
+d.ellipse(((cx - lit) * K, (cy - lit) * K, (cx + lit) * K, (cy + lit) * K), fill=(44, 42, 44, 255))
 hx, hy = cx - 1.4, cy - 1.6
-d.ellipse(((hx - 1.4) * K, (hy - 1.1) * K, (hx + 1.4) * K, (hy + 1.1) * K), fill=(255, 170, 150, 230))
+d.ellipse(((hx - 1.4) * K, (hy - 1.1) * K, (hx + 1.4) * K, (hy + 1.1) * K), fill=(90, 88, 92, 160))
 font = ImageFont.truetype(font_path, 9 * K)
 text, track = 'POWER', 1.2 * K
 widths = [font.getlength(c) for c in text]
@@ -50,3 +51,5 @@ panel = out.crop((0, 0, LEFT, 200))
 panel.alpha_composite(small)
 out.paste(panel, (0, 0))
 out.save(out_path, optimize=True)
+with open(out_path[:-len('.png')] + '.light', 'w') as f:
+    f.write(f'{cx} {cy} {lit}\n')
