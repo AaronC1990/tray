@@ -6,3 +6,4 @@ pub mod library;
 pub mod motion;
 pub mod play;
 pub mod shelf;
+pub mod sound;

@@ -552,6 +552,19 @@ impl Frontend {
         self.session.play_sfx(sfx);
     }
 
+    /// The rate sounds are played at now, for making one to `mix_sound`.
+    pub fn audio_rate(&self) -> u32 {
+        self.session.audio_ring().sample_rate()
+    }
+
+    /// Plays another frontend's sound over whatever is playing, at slot's
+    /// volume, as slot plays its own: stereo, at `audio_rate`.
+    pub fn mix_sound(&mut self, samples: &[i16]) {
+        let mut samples = samples.to_vec();
+        crate::audio::volume::apply(&mut samples, self.session.app().output_volume());
+        self.session.audio_ring().mix(&samples);
+    }
+
     pub fn audio_sink(&mut self) -> &mut dyn crate::audio::AudioSink {
         self.session.sink_mut()
     }

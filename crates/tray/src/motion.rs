@@ -5,13 +5,13 @@
 //! shuts, as a console's drive would tell it.
 use std::path::Path;
 
-use slot::audio::Sfx;
 use slot_gfx::Compositor;
 
 use crate::disc::{disc_face, label_art};
 use crate::library::Game;
 use crate::play::DiscGame;
 use crate::shelf::{Look, ShelfView, BIG, INSERT_S, IN_S, OUT_S};
+use crate::sound::{Sound, DOWN};
 
 fn ease(u: f32) -> f32 {
     slot_ui::ease(u.clamp(0.0, 1.0))
@@ -28,9 +28,9 @@ fn dip(t: f32, from: f32, to: f32) -> f32 {
     ease(span(t, from, mid)) * (1.0 - ease(span(t, mid, to)))
 }
 
-/// Whether `t` crossed `at` going from `was`.
+/// Whether `t` passed `at` going from `was`; a start at `at` counts.
 fn crossed(was: f32, t: f32, at: f32) -> bool {
-    was < at && t >= at
+    was <= at && t > at
 }
 
 /// Disc `index` of `game` as a face: its own label art if the card has it,
@@ -77,13 +77,15 @@ impl Insert {
 
     /// Moves `dt` seconds on, waiting seated until `loaded`. Returns a
     /// sound to play, if one is due.
-    pub fn tick(&mut self, dt: f32) -> Option<Sfx> {
+    pub fn tick(&mut self, dt: f32) -> Option<Sound> {
         let was = self.t;
         self.t += dt;
         if !self.loaded {
             self.t = self.t.min(INSERT_S);
         }
-        crossed(was, self.t, IN_S - Sfx::Insert.lead()).then_some(Sfx::Insert)
+        // The motor takes the disc from the first moment, and its click
+        // lands as the disc seats.
+        crossed(was, self.t, 0.0).then_some(Sound::PullIn)
     }
 
     /// Whether the disc is seated and the game should load now.
@@ -136,10 +138,11 @@ impl Eject {
         Eject { t: 0.0 }
     }
 
-    pub fn tick(&mut self, dt: f32) -> Option<Sfx> {
+    pub fn tick(&mut self, dt: f32) -> Option<Sound> {
         let was = self.t;
         self.t += dt;
-        crossed(was, self.t, Self::SHOWN).then_some(Sfx::Eject)
+        // The disc spins down, then the motor pushes it out as it rises.
+        crossed(was, self.t, Self::SHOWN - DOWN).then_some(Sound::PushOut)
     }
 
     pub fn done(&self) -> bool {
@@ -219,7 +222,7 @@ impl Swap {
     /// Moves `dt` seconds on, opening the lid, changing the disc and
     /// shutting the lid in the core as the picture does. Returns a sound
     /// to play, if one is due.
-    pub fn tick(&mut self, dt: f32, game: &mut DiscGame) -> Option<Sfx> {
+    pub fn tick(&mut self, dt: f32, game: &mut DiscGame) -> Option<Sound> {
         let was = self.t;
         self.t += dt;
         if !self.opened && self.t >= Self::SHOWN {
@@ -234,10 +237,13 @@ impl Swap {
             self.shut = true;
             game.set_lid_open(false);
         }
-        if crossed(was, self.t, Self::SHOWN) {
-            return Some(Sfx::Eject);
+        if crossed(was, self.t, Self::SHOWN - DOWN) {
+            return Some(Sound::PushOut);
         }
-        crossed(was, self.t, Self::IN - Sfx::Insert.lead()).then_some(Sfx::Insert)
+        if crossed(was, self.t, Self::BACK) {
+            return Some(Sound::PullIn);
+        }
+        crossed(was, self.t, Self::IN).then_some(Sound::SpinUp)
     }
 
     pub fn done(&self) -> bool {

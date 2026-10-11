@@ -19,6 +19,7 @@ use tray::library::{scan, Game};
 use tray::motion::{Eject, Insert, Swap};
 use tray::play::{state_ring, Ask, Combos, DiscGame, Fast, SAVES};
 use tray::shelf::{Look, ShelfView};
+use tray::sound::Sound;
 
 const CARD: &str = "/mnt/sdcard";
 const GAMES: &str = "Games/PS";
@@ -356,6 +357,8 @@ fn main() {
                             Ok(g) => {
                                 *game = Some(Box::new(g));
                                 anim.loaded();
+                                // Read: the disc spins up as the game starts.
+                                sound = Some(Sound::SpinUp);
                             }
                             Err(e) => {
                                 eprintln!("tray: {}: {e}", games[*which].path.display());
@@ -533,7 +536,8 @@ fn main() {
             };
         }
         if let Some(s) = sound {
-            frontend.play_sfx(s);
+            let samples = s.render(frontend.audio_rate());
+            frontend.mix_sound(&samples);
         }
         if matches!(mode, Mode::Carts) {
             frontend.step_emulator(pacer.period, STEP_TIMEOUT);
